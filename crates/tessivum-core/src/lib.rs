@@ -3,6 +3,14 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod error;
+mod ids;
+mod lifecycle;
+
+pub use error::CoreError;
+pub use ids::{FiberId, Generation, ResourceId, ScopeId};
+pub use lifecycle::{BoxDisposer, CancellationToken, EffectMeta, Fiber, FiberState, Scope};
+
 pub const SCHEMA_VERSION: &str = "tessivum.conformance/v1";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
