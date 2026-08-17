@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/tessivum-core"]
+resolver = "2"

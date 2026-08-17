@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "tessivum.intentional-differences/v1",
+  "lifecycleConformance": {
+    "status": "equal",
+    "scope": [
+      "ownership",
+      "state-transitions",
+      "failed-start-rollback",
+      "nested-reverse-cleanup",
+      "reentrant-disposal"
+    ],
+    "source": {
+      "harness": "8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4",
+      "vendoredCordis": "56b3d4f725681cf4556c1a8695a709cc3b6eed74"
+    }
+  },
+  "differences": [
+    {
+      "id": "no-javascript-proxy-or-prototype",
+      "status": "accepted",
+      "kind": "runtime-model",
+      "sourceBehavior": "Cordis and JavaScript consumers may observe Proxy traps and prototype-based object behavior.",
+      "tessivumBehavior": "Tessivum uses explicit Rust values, handles, and APIs; it does not reproduce JavaScript Proxy or prototype semantics.",
+      "rationale": "Proxy traps and prototype identity are JavaScript implementation mechanics, not portable core lifecycle behavior.",
+      "conformanceImpact": "No lifecycle trace difference is permitted.",
+      "m0Treatment": "Documented only; supported M0 fixtures compare lifecycle behavior, not JavaScript object mechanics."
+    },
+    {
+      "id": "safe-expressions-replace-arbitrary-double-bang-js",
+      "status": "accepted",
+      "kind": "configuration-language",
+      "sourceBehavior": "Legacy configuration can contain arbitrary !!js subtrees evaluated by JavaScript.",
+      "tessivumBehavior": "Tessivum accepts a constrained, deterministic safe-expression language instead of evaluating arbitrary !!js in the Rust host.",
+      "rationale": "Arbitrary host JavaScript evaluation is neither a safe nor a language-neutral configuration contract.",
+      "conformanceImpact": "No lifecycle trace difference is permitted; configuration execution is outside M0.",
+      "m0Treatment": "Loader scenarios return UNSUPPORTED_SCENARIO. Future unsupported legacy !!js input is routed to the Legacy Node Loader rather than evaluated by Rust."
+    }
+  ]
+}

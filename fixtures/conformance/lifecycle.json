@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "lifecycle.core-catalog",
+  "domain": "lifecycle",
+  "scenario": "effect-dispose",
+  "input": {
+    "effects": ["effect-dispose"],
+    "cases": [
+      {"id": "sync-start", "start": "sync"},
+      {"id": "async-start", "start": "async"},
+      {"id": "sync-cleanup", "cleanup": "sync"},
+      {"id": "async-cleanup", "cleanup": "async"},
+      {"id": "iterable-cleanup", "cleanup": "iterable"},
+      {"id": "nested-effect", "effects": "nested"},
+      {"id": "reverse-disposal", "effects": "nested"},
+      {"id": "repeated-disposal", "disposeCalls": 2},
+      {"id": "reentrant-disposal", "cleanupCallsDispose": true},
+      {"id": "failed-start-rollback", "start": "throws"},
+      {"id": "parent-child-quiescence", "children": 1},
+      {"id": "unload-registration-rejection", "registerDuringUnload": true}
+    ]
+  },
+  "expectedTrace": [
+    {"event": "fiber-created", "subject": "effect-dispose"},
+    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "PENDING", "to": "LOADING"},
+    {"event": "effect-created", "subject": "effect-dispose.effect", "label": "effect-dispose"},
+    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "LOADING", "to": "ACTIVE"},
+    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "ACTIVE", "to": "UNLOADING"},
+    {"event": "effect-disposed", "subject": "effect-dispose.effect", "label": "effect-dispose"},
+    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "UNLOADING", "to": "DISPOSED"}
+  ]
+}

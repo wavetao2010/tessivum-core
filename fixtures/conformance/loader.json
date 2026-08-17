@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "loader.core-catalog",
+  "domain": "loader",
+  "scenario": "loader-catalog",
+  "input": {
+    "cases": [
+      {"id": "unordered-dependencies", "entries": ["consumer", "provider"], "requires": {"consumer": ["provider"]}},
+      {"id": "duplicate-id", "entries": ["duplicate", "duplicate"]},
+      {"id": "add-update-remove-move", "operations": ["add", "update", "remove", "move"]},
+      {"id": "config-only-update", "operations": ["update-config"]},
+      {"id": "plugin-replacement", "operations": ["replace-plugin"]},
+      {"id": "candidate-failure", "candidate": "throws"},
+      {"id": "rollback-failure", "candidate": "throws", "rollback": "throws"},
+      {"id": "nested-group", "groups": ["root", "root.child"]},
+      {"id": "patch-insertion-later-targeting", "operations": ["insert-patch", "target-patch"]},
+      {"id": "atomic-write", "write": "atomic"}
+    ]
+  },
+  "expectedTrace": []
+}

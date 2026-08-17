@@ -1,0 +1,32 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "event.core-catalog",
+  "domain": "event",
+  "scenario": "emit",
+  "input": {
+    "event": "emit.event",
+    "mode": "emit",
+    "listeners": [{"label": "first"}, {"label": "second"}],
+    "cases": [
+      {"id": "emit-ordering", "mode": "emit", "listeners": ["first", "second"]},
+      {"id": "parallel-aggregate", "mode": "parallel", "listeners": ["left", "right"]},
+      {"id": "serial-bail", "mode": "serial", "bail": "stop"},
+      {"id": "sync-bail", "mode": "bail", "bail": "stop"},
+      {"id": "waterfall-next", "mode": "waterfall"},
+      {"id": "waterfall-short-circuit", "mode": "waterfall"},
+      {"id": "waterfall-wrap", "mode": "waterfall"},
+      {"id": "prepend", "mode": "emit"},
+      {"id": "scoped-filter", "mode": "emit"},
+      {"id": "listener-self-removal", "mode": "emit"},
+      {"id": "owner-disposal-during-dispatch", "mode": "emit"}
+    ]
+  },
+  "expectedTrace": [
+    {"event": "listener-added", "subject": "emit.event", "label": "first"},
+    {"event": "listener-added", "subject": "emit.event", "label": "second"},
+    {"event": "event-dispatched", "subject": "emit.event", "label": "first", "phase": "emit"},
+    {"event": "event-dispatched", "subject": "emit.event", "label": "second", "phase": "emit"},
+    {"event": "listener-removed", "subject": "emit.event", "label": "second"},
+    {"event": "listener-removed", "subject": "emit.event", "label": "first"}
+  ]
+}

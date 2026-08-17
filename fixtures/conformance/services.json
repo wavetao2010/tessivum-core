@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "service.core-catalog",
+  "domain": "service",
+  "scenario": "isolate-realm",
+  "input": {
+    "service": "storage",
+    "first": "root",
+    "second": "isolated",
+    "cases": [
+      {"id": "late-provider", "required": "clock"},
+      {"id": "provider-replacement", "service": "theme"},
+      {"id": "provider-removal-recovery", "service": "cache"},
+      {"id": "optional-dependency", "optional": "metrics"},
+      {"id": "duplicate-provider", "service": "logger"},
+      {"id": "isolate-realms", "service": "storage", "realms": ["alpha", "beta"]},
+      {"id": "shared-realm", "service": "bus", "realm": "shared"},
+      {"id": "intercept-merge", "service": "config"},
+      {"id": "stale-generation", "service": "session"}
+    ]
+  },
+  "expectedTrace": [
+    {"event": "fiber-created", "subject": "isolate-realm.root"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "PENDING", "to": "LOADING"},
+    {"event": "service-provided", "subject": "storage", "label": "root"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "LOADING", "to": "ACTIVE"},
+    {"event": "fiber-created", "subject": "isolate-realm.isolated"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "PENDING", "to": "LOADING"},
+    {"event": "service-provided", "subject": "storage", "label": "isolated"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "LOADING", "to": "ACTIVE"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "ACTIVE", "to": "UNLOADING"},
+    {"event": "service-removed", "subject": "storage", "label": "isolated"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "UNLOADING", "to": "DISPOSED"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "ACTIVE", "to": "UNLOADING"},
+    {"event": "service-removed", "subject": "storage", "label": "root"},
+    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "UNLOADING", "to": "DISPOSED"}
+  ]
+}
