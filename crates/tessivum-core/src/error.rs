@@ -32,6 +32,11 @@ pub enum CoreError {
     },
     /// A waterfall continuation was called more than once.
     WaterfallContinuationUsed,
+    /// A native plugin lifecycle hook returned a structured failure.
+    Plugin {
+        phase: &'static str,
+        message: String,
+    },
 }
 
 impl CoreError {
@@ -85,6 +90,9 @@ impl fmt::Display for CoreError {
             }
             Self::WaterfallContinuationUsed => {
                 formatter.write_str("waterfall continuation already used")
+            }
+            Self::Plugin { phase, message } => {
+                write!(formatter, "native plugin {phase} failed: {message}")
             }
         }
     }

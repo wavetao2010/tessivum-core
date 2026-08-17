@@ -415,10 +415,26 @@ pub trait PackageResolver: Send + Sync {
     ) -> LoaderFuture<'a, ResolvedPackage>;
 }
 
+/// The state reached by one managed runtime activation pass.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ActivationState {
+    Active,
+    Pending,
+}
+
 /// A live plugin instance whose effects are still confined to its candidate
 /// context until `activate` succeeds.
 pub trait RuntimeHandle: Send {
     fn activate<'a>(&'a mut self) -> LoaderFuture<'a, ()>;
+
+    /// Advances managed activation without making a missing required dependency
+    /// an import failure. Existing runtimes stay eager by default.
+    fn activation<'a>(&'a mut self) -> LoaderFuture<'a, ActivationState> {
+        Box::pin(async move {
+            self.activate().await?;
+            Ok(ActivationState::Active)
+        })
+    }
     fn dispose<'a>(&'a mut self) -> LoaderFuture<'a, ()>;
 }
 
@@ -683,11 +699,40 @@ async fn import_entry(
 }
 
 async fn activate_all(entries: &mut [LiveEntry]) -> Vec<LoaderResult<()>> {
-    let futures = entries
-        .iter_mut()
-        .map(|entry| entry.handle.activate())
-        .collect::<Vec<_>>();
-    all_settle(futures).await
+    let mut pending = (0..entries.len()).collect::<Vec<_>>();
+    let mut errors = Vec::new();
+
+    while !pending.is_empty() {
+        let pending_set = pending.iter().copied().collect::<BTreeSet<_>>();
+        let results = all_settle(
+            entries
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    pending_set
+                        .contains(&index)
+                        .then(|| entry.handle.activation())
+                })
+                .collect(),
+        )
+        .await;
+        let mut next = Vec::new();
+        let mut progressed = false;
+
+        for (index, result) in pending.into_iter().zip(results) {
+            match result {
+                Ok(ActivationState::Active) => progressed = true,
+                Ok(ActivationState::Pending) => next.push(index),
+                Err(error) => errors.push(error),
+            }
+        }
+        if !errors.is_empty() || !progressed {
+            break;
+        }
+        pending = next;
+    }
+
+    errors.into_iter().map(Err).collect()
 }
 
 async fn dispose_all(entries: &mut [LiveEntry]) -> Vec<LoaderError> {

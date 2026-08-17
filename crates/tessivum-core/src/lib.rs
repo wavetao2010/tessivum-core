@@ -10,6 +10,7 @@ mod events;
 mod ids;
 mod lifecycle;
 pub mod loader;
+pub mod native;
 mod service;
 
 pub use config::{evaluate_config, ConfigExpression, ConfigScope};
@@ -22,9 +23,15 @@ pub use events::{
 pub use ids::{FiberId, Generation, RealmLabel, ResourceId, ScopeId, ServiceKey};
 pub use lifecycle::{BoxDisposer, CancellationToken, EffectMeta, Fiber, FiberState, Scope};
 pub use loader::{
-    apply_entry_patches, parse_entry_tree, persist_entry_tree, Entry, EntryGroup, EntryId,
-    EntryOptions, EntryTree, HmrDriver, Loader, LoaderFuture, LoaderResult, LoaderRuntime,
+    apply_entry_patches, parse_entry_tree, persist_entry_tree, ActivationState, Entry, EntryGroup,
+    EntryId, EntryOptions, EntryTree, HmrDriver, Loader, LoaderFuture, LoaderResult, LoaderRuntime,
     PackageResolver, Patch, ResolvedPackage, RuntimeHandle, RuntimeKind,
+};
+pub use native::{
+    NativeConfigError, NativeConfigKind, NativeConfigSchema, NativeFiberSnapshot, NativePlugin,
+    NativePluginDescriptor, NativePluginError, NativePluginFactory, NativePluginFuture,
+    NativePluginInstance, NativePluginPhase, NativePluginResult, NativePluginRuntime,
+    NativePluginRuntimeSnapshot, NativePluginSnapshot,
 };
 pub use service::{
     Dependency, DependencySnapshot, DependencySubscription, ServiceHandle, ServiceSnapshot,
