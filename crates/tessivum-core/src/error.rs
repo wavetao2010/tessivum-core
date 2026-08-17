@@ -1,6 +1,6 @@
 use std::{error::Error, fmt};
 
-use crate::FiberState;
+use crate::{FiberState, Generation};
 
 /// A lifecycle operation could not complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -16,6 +16,10 @@ pub enum CoreError {
     SetupFailed(String),
     /// One or more disposers failed after all cleanup was attempted.
     Cleanup(Vec<CoreError>),
+    /// A typed lookup found a provider with a different Rust contract type.
+    ServiceTypeMismatch { key: String },
+    /// A service handle was used after its provider changed or was removed.
+    StaleServiceHandle { key: String, generation: Generation },
 }
 
 impl CoreError {
@@ -51,6 +55,15 @@ impl fmt::Display for CoreError {
             }
             Self::Cancelled => formatter.write_str("operation cancelled"),
             Self::SetupFailed(message) => formatter.write_str(message),
+            Self::ServiceTypeMismatch { key } => {
+                write!(formatter, "service {key} has a different Rust type")
+            }
+            Self::StaleServiceHandle { key, generation } => {
+                write!(
+                    formatter,
+                    "service handle for {key} at {generation} is stale"
+                )
+            }
             Self::Cleanup(errors) => write!(formatter, "{} cleanup error(s)", errors.len()),
         }
     }

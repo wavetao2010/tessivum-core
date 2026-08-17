@@ -3,13 +3,19 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod context;
 mod error;
 mod ids;
 mod lifecycle;
+mod service;
 
+pub use context::ContextHandle;
 pub use error::CoreError;
-pub use ids::{FiberId, Generation, ResourceId, ScopeId};
+pub use ids::{FiberId, Generation, RealmLabel, ResourceId, ScopeId, ServiceKey};
 pub use lifecycle::{BoxDisposer, CancellationToken, EffectMeta, Fiber, FiberState, Scope};
+pub use service::{
+    Dependency, DependencySnapshot, DependencySubscription, ServiceHandle, ServiceSnapshot,
+};
 
 pub const SCHEMA_VERSION: &str = "tessivum.conformance/v1";
 
