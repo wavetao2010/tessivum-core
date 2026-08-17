@@ -1,7 +1,55 @@
 use std::{error::Error, fmt};
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
 use crate::{FiberState, Generation};
 
+/// A stable error payload that may cross a plugin-runtime boundary.
+///
+/// Consumers must branch on `code` and `phase`; `message` and `details` are
+/// diagnostic data only.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PluginError {
+    pub code: String,
+    pub message: String,
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+impl PluginError {
+    pub fn new(
+        code: impl Into<String>,
+        message: impl Into<String>,
+        phase: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+            phase: phase.into(),
+            details: None,
+        }
+    }
+
+    pub fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
+    }
+}
+
+impl fmt::Display for PluginError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} during {}: {}",
+            self.code, self.phase, self.message
+        )
+    }
+}
+
+impl Error for PluginError {}
 /// A lifecycle operation could not complete.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CoreError {

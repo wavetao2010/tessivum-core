@@ -1,0 +1,13 @@
+[package]
+name = "tessivum-wasm-minimal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extism-pdk = { version = "=1.4.1", default-features = false }
+serde_json = "1"
+tessivum-pdk = { path = "../../crates/tessivum-pdk" }

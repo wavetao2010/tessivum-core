@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/tessivum-core", "examples/native-minimal"]
+members = ["crates/tessivum-core", "crates/tessivum-extism", "crates/tessivum-pdk", "examples/native-minimal", "examples/wasm-minimal"]
 resolver = "2"

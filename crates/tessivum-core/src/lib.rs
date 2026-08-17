@@ -15,7 +15,7 @@ mod service;
 
 pub use config::{evaluate_config, ConfigExpression, ConfigScope};
 pub use context::ContextHandle;
-pub use error::{CoreError, LoaderError};
+pub use error::{CoreError, LoaderError, PluginError};
 pub use events::{
     DispatchDiagnostic, DispatchMode, DispatchOutcome, DynamicEvent, EventBus, EventFuture,
     EventKey, EventOptions, EventResult, EventValue, ListenerHandle, WaterfallNext,

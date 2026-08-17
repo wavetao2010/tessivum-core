@@ -1,0 +1,13 @@
+{
+  "name": "@tessivum/wasm-typescript-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cordis plugin ABI v1 guest written for the Extism JavaScript PDK",
+  "scripts": {
+    "typecheck": "tsc --noEmit --lib es2020 --types @extism/js-pdk src/index.ts"
+  },
+  "devDependencies": {
+    "@extism/js-pdk": "^1.1.1",
+    "typescript": "^5.0.0"
+  }
+}
