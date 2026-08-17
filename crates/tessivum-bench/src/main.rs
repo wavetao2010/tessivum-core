@@ -309,9 +309,12 @@ fn benchmark_native_lifecycle(samples: usize) -> Result<Value, String> {
     let mut values = Vec::with_capacity(samples);
     for _ in 0..samples {
         let context = ContextHandle::root();
-        let mut instance =
-            NativePluginInstance::instantiate(Box::new(NoopPlugin), context.clone(), json!({}))
-                .map_err(|error| error.to_string())?;
+        let mut instance = NativePluginInstance::instantiate(
+            Arc::new(|| Box::new(NoopPlugin) as Box<dyn NativePlugin>),
+            context.clone(),
+            json!({}),
+        )
+        .map_err(|error| error.to_string())?;
         let start = Instant::now();
         let lifecycle = (|| -> Result<(), String> {
             block_on(instance.start()).map_err(|error| error.to_string())?;

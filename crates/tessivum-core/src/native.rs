@@ -539,17 +539,8 @@ impl fmt::Debug for NativePluginInstance {
 }
 
 impl NativePluginInstance {
-    /// Creates a pending instance after validating the descriptor and initial config.
+    /// Creates a pending instance after validating a freshly constructed plugin and its config.
     pub fn instantiate(
-        plugin: Box<dyn NativePlugin>,
-        context: ContextHandle,
-        config: Value,
-    ) -> NativePluginResult<Self> {
-        Self::instantiate_inner(plugin, None, context, config)
-    }
-
-    /// Creates an instance which can stage a fresh plugin during transactional updates.
-    pub fn instantiate_with_factory(
         factory: NativePluginFactory,
         context: ContextHandle,
         config: Value,
@@ -660,7 +651,7 @@ impl NativePluginInstance {
                 message: "transactional updates require an instance factory".into(),
             })?;
         let cancellation = self.cancellation();
-        let mut candidate = Self::instantiate_with_factory(factory, self.context.staged(), config)?;
+        let mut candidate = Self::instantiate(factory, self.context.staged(), config)?;
 
         if let Err(error) = candidate.start_after_update(cancellation).await {
             return match candidate.dispose().await {
@@ -825,14 +816,56 @@ pub struct NativePluginRuntimeSnapshot {
 
 /// The native Loader runtime. Factories are closures rather than a second plugin
 /// abstraction, so every loader candidate gets a fresh native instance.
-#[derive(Default)]
+type ManagedRuntimeBuilder =
+    Arc<dyn Fn() -> std::io::Result<tokio::runtime::Runtime> + Send + Sync>;
+type ManagedSnapshotObserver = Arc<dyn Fn() + Send + Sync>;
+
 pub struct NativePluginRuntime {
     factories: BTreeMap<String, NativePluginFactory>,
+    runtime_builder: ManagedRuntimeBuilder,
+    snapshot_observer: Option<ManagedSnapshotObserver>,
+}
+
+impl Default for NativePluginRuntime {
+    fn default() -> Self {
+        Self {
+            factories: BTreeMap::new(),
+            runtime_builder: Arc::new(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+            }),
+            snapshot_observer: None,
+        }
+    }
 }
 
 impl NativePluginRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[doc(hidden)]
+    pub fn with_runtime_builder(
+        runtime_builder: impl Fn() -> std::io::Result<tokio::runtime::Runtime> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            factories: BTreeMap::new(),
+            runtime_builder: Arc::new(runtime_builder),
+            snapshot_observer: None,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn with_runtime_builder_observer(
+        runtime_builder: impl Fn() -> std::io::Result<tokio::runtime::Runtime> + Send + Sync + 'static,
+        snapshot_observer: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            factories: BTreeMap::new(),
+            runtime_builder: Arc::new(runtime_builder),
+            snapshot_observer: Some(Arc::new(snapshot_observer)),
+        }
     }
 
     pub fn register<P, F>(
@@ -894,14 +927,18 @@ impl LoaderRuntime for NativePluginRuntime {
                     package.specifier
                 ))
             })?;
-            let instance = NativePluginInstance::instantiate_with_factory(
+            let instance = NativePluginInstance::instantiate(
                 Arc::clone(factory),
                 context,
                 entry.options.config,
             )
             .map_err(|error| LoaderError::Validation(error.to_string()))?;
-            let handle = NativeRuntimeHandle::new(instance)
-                .map_err(|error| LoaderError::Validation(error.to_string()))?;
+            let handle = NativeRuntimeHandle::new(
+                instance,
+                Arc::clone(&self.runtime_builder),
+                self.snapshot_observer.clone(),
+            )
+            .map_err(|error| LoaderError::Validation(error.to_string()))?;
             Ok(Box::new(handle) as Box<dyn RuntimeHandle>)
         })
     }
@@ -917,6 +954,7 @@ enum ManagedPhase {
 
 struct ManagedState {
     activated: bool,
+    initialized: bool,
     stopping: bool,
     dirty: bool,
     snapshot: DependencySnapshot,
@@ -929,13 +967,17 @@ struct ManagedState {
 struct ManagedControl {
     state: Mutex<ManagedState>,
     changed: Condvar,
+    snapshot_observer: Option<ManagedSnapshotObserver>,
 }
-
 impl ManagedControl {
-    fn new(dependencies: &[Dependency]) -> Arc<Self> {
+    fn new(
+        dependencies: &[Dependency],
+        snapshot_observer: Option<ManagedSnapshotObserver>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(ManagedState {
                 activated: false,
+                initialized: false,
                 stopping: false,
                 dirty: false,
                 snapshot: DependencySnapshot {
@@ -950,6 +992,7 @@ impl ManagedControl {
                 waker: None,
             }),
             changed: Condvar::new(),
+            snapshot_observer,
         })
     }
 
@@ -966,6 +1009,9 @@ impl ManagedControl {
         self.changed.notify_all();
         if let Some(waker) = waker {
             waker.wake();
+        }
+        if let Some(observer) = &self.snapshot_observer {
+            observer();
         }
     }
 
@@ -987,6 +1033,20 @@ impl ManagedControl {
             state.waker.take()
         };
         self.changed.notify_all();
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+
+    fn set_initialized(&self) {
+        let waker = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            state.initialized = true;
+            state.waker.take()
+        };
         if let Some(waker) = waker {
             waker.wake();
         }
@@ -1043,7 +1103,7 @@ impl ManagedControl {
                         .expect("failed native runtime stores its error")
                         .to_string(),
                 ))),
-                ManagedPhase::Pending if !state.snapshot.ready => {
+                ManagedPhase::Pending if state.initialized && !state.snapshot.ready => {
                     Poll::Ready(Ok(ActivationState::Pending))
                 }
                 _ => {
@@ -1127,16 +1187,33 @@ fn run_managed_native(
     mut instance: NativePluginInstance,
     dependencies: Vec<Dependency>,
     control: Arc<ManagedControl>,
-    watcher: ManagedWatcher,
+    runtime_builder: ManagedRuntimeBuilder,
 ) -> NativePluginResult<()> {
     let package = instance.descriptor().name.clone();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|error| NativePluginError::Runtime {
-            package,
-            message: format!("failed to create Tokio runtime: {error}"),
-        })?;
+    let runtime = match runtime_builder() {
+        Ok(runtime) => runtime,
+        Err(build_error) => {
+            let error = NativePluginError::Runtime {
+                package,
+                message: format!("failed to create Tokio runtime: {build_error}"),
+            };
+            control.set_phase(ManagedPhase::Failed, Some(error.clone()));
+            return Err(error);
+        }
+    };
+    let watcher = match ManagedWatcher::new(
+        instance.context(),
+        dependencies.clone(),
+        Arc::clone(&control),
+    ) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            let error = NativePluginError::Core(error);
+            control.set_phase(ManagedPhase::Failed, Some(error.clone()));
+            return Err(error);
+        }
+    };
+    control.set_initialized();
     let mut active_generations = None;
     loop {
         let (stopping, snapshot) = control.next_snapshot();
@@ -1213,18 +1290,17 @@ struct NativeRuntimeHandle {
 }
 
 impl NativeRuntimeHandle {
-    fn new(instance: NativePluginInstance) -> NativePluginResult<Self> {
+    fn new(
+        instance: NativePluginInstance,
+        runtime_builder: ManagedRuntimeBuilder,
+        snapshot_observer: Option<ManagedSnapshotObserver>,
+    ) -> NativePluginResult<Self> {
         let dependencies = instance.descriptor().dependencies.clone();
-        let control = ManagedControl::new(&dependencies);
-        let watcher = ManagedWatcher::new(
-            instance.context(),
-            dependencies.clone(),
-            Arc::clone(&control),
-        )?;
+        let control = ManagedControl::new(&dependencies, snapshot_observer);
         control.set_cancellation(instance.cancellation());
         let worker_control = Arc::clone(&control);
         let worker = thread::spawn(move || {
-            run_managed_native(instance, dependencies, worker_control, watcher)
+            run_managed_native(instance, dependencies, worker_control, runtime_builder)
         });
         Ok(Self {
             control,

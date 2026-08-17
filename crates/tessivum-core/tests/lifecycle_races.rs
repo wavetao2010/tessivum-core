@@ -325,3 +325,71 @@ async fn aborting_sole_dispose_caller_keeps_cleanup_running() {
         .await
         .expect("later disposal returns the published cleanup result");
 }
+
+#[tokio::test]
+async fn parent_dispose_reenters_from_independently_disposing_child_cleanup() {
+    let parent = Scope::root();
+    let child = parent.child().expect("child scope registration succeeds");
+    let (child_cleanup_started, child_cleanup_started_rx) = oneshot::channel();
+    let (allow_child_reentry_tx, mut allow_child_reentry_rx) = oneshot::channel();
+    let (child_context_updated, child_context_updated_rx) = oneshot::channel();
+    let mut child_context_updated = Some(child_context_updated);
+    let parent_for_disposer = parent.clone();
+    child
+        .add_effect(
+            "reenter parent disposal",
+            disposer(move || async move {
+                child_cleanup_started
+                    .send(())
+                    .expect("test observes child cleanup entry");
+                let mut first_context_poll = true;
+                std::future::poll_fn(move |context| {
+                    if first_context_poll {
+                        first_context_poll = false;
+                    } else if let Some(child_context_updated) = child_context_updated.take() {
+                        child_context_updated
+                            .send(())
+                            .expect("parent updates the child disposal context");
+                    }
+                    std::pin::Pin::new(&mut allow_child_reentry_rx).poll(context)
+                })
+                .await
+                .expect("test permits child reentry");
+                parent_for_disposer.dispose().await
+            }),
+        )
+        .expect("child effect registration succeeds");
+
+    let independently_disposing_child = child.clone();
+    let child_dispose = tokio::spawn(async move { independently_disposing_child.dispose().await });
+    child_cleanup_started_rx
+        .await
+        .expect("independent child disposal reaches its cleanup gate");
+
+    let independently_disposing_parent = parent.clone();
+    let parent_dispose =
+        tokio::spawn(async move { independently_disposing_parent.dispose().await });
+    tokio::time::timeout(Duration::from_secs(1), child_context_updated_rx)
+        .await
+        .expect("parent propagates its context to the disposing child")
+        .expect("child cleanup observes the propagated parent context");
+    assert!(
+        !parent_dispose.is_finished(),
+        "parent waits for the independently disposing child"
+    );
+
+    allow_child_reentry_tx
+        .send(())
+        .expect("test permits child to reenter parent disposal");
+    tokio::time::timeout(Duration::from_secs(1), parent_dispose)
+        .await
+        .expect("parent cleanup does not deadlock waiting for its child")
+        .expect("parent disposal task does not panic")
+        .expect("parent cleanup succeeds after child reenters");
+    child_dispose
+        .await
+        .expect("child disposal task does not panic")
+        .expect("child cleanup succeeds after reentry");
+    assert_eq!(parent.state(), FiberState::Disposed);
+    assert_eq!(child.state(), FiberState::Disposed);
+}

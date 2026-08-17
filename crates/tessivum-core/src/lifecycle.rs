@@ -257,10 +257,22 @@ impl Scope {
 
     /// Disposes children and local effects once, in reverse registration order.
     pub async fn dispose(&self) -> Result<(), CoreError> {
+        let id = self.id();
         match self.claim_disposal() {
-            DisposeClaim::Join if is_disposing(self.id()) => Ok(()),
-            DisposeClaim::Owner | DisposeClaim::Join => {
+            DisposeClaim::Owner => {
                 std::future::poll_fn(|context| self.inner.completion.wait(context)).await
+            }
+            DisposeClaim::Join if is_disposing(id) => Ok(()),
+            DisposeClaim::Join => {
+                self.inner.completion.inherit_ancestors(&disposing_scopes());
+                std::future::poll_fn(|context| {
+                    if is_disposing(id) {
+                        Poll::Ready(Ok(()))
+                    } else {
+                        self.inner.completion.wait(context)
+                    }
+                })
+                .await
             }
         }
     }
@@ -284,17 +296,26 @@ impl Scope {
 
                 let cleanup_resources = mem::take(&mut *resources);
                 let id = self.id();
+                let ancestor_scopes = disposing_scopes();
+                let mut child_ancestors = ancestor_scopes.clone();
+                child_ancestors.push(id);
+                for child in &cleanup_resources.children {
+                    child.inner.completion.inherit_ancestors(&child_ancestors);
+                }
                 let scope = Arc::downgrade(&self.inner);
-                self.inner.completion.start(Box::pin(async move {
-                    let result =
-                        DisposalContext::new(id, Self::dispose_resources(cleanup_resources)).await;
-                    if let Some(scope) = scope.upgrade() {
-                        scope
-                            .state
-                            .store(FiberState::Disposed as u8, Ordering::Release);
-                    }
-                    result
-                }));
+                self.inner.completion.start(
+                    ancestor_scopes,
+                    id,
+                    Box::pin(async move {
+                        let result = Self::dispose_resources(cleanup_resources).await;
+                        if let Some(scope) = scope.upgrade() {
+                            scope
+                                .state
+                                .store(FiberState::Disposed as u8, Ordering::Release);
+                        }
+                        result
+                    }),
+                );
                 DisposeClaim::Owner
             }
         }
@@ -491,6 +512,7 @@ struct DisposeCompletion {
 struct DisposeCompletionInner {
     result: Mutex<Option<Result<(), CoreError>>>,
     waiters: Mutex<Vec<Waker>>,
+    context: Arc<Mutex<DisposalContextState>>,
 }
 
 impl std::fmt::Debug for DisposeCompletionInner {
@@ -507,11 +529,14 @@ impl DisposeCompletion {
             inner: Arc::new(DisposeCompletionInner {
                 result: Mutex::new(None),
                 waiters: Mutex::new(Vec::new()),
+                context: Arc::new(Mutex::new(DisposalContextState::default())),
             }),
         }
     }
 
-    fn start(&self, cleanup: CleanupFuture) {
+    fn start(&self, ancestors: Vec<ScopeId>, id: ScopeId, cleanup: CleanupFuture) {
+        self.inherit_ancestors(&ancestors);
+        let cleanup = DisposalContext::new(Arc::clone(&self.inner.context), id, cleanup);
         let completion = self.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             drop(handle.spawn(async move {
@@ -530,9 +555,29 @@ impl DisposeCompletion {
         }
     }
 
+    fn inherit_ancestors(&self, ancestors: &[ScopeId]) {
+        let wakers = {
+            let mut context = lock(&self.inner.context);
+            let original_len = context.ancestors.len();
+            for ancestor in ancestors {
+                if !context.ancestors.contains(ancestor) {
+                    context.ancestors.push(*ancestor);
+                }
+            }
+            if context.ancestors.len() == original_len {
+                return;
+            }
+            mem::take(&mut context.wakers)
+        };
+        for waker in wakers {
+            waker.wake();
+        }
+    }
+
     fn complete(&self, result: Result<(), CoreError>) {
         *lock(&self.inner.result) = Some(result);
         self.wake_waiters();
+        self.wake_context_wakers();
     }
 
     fn result(&self) -> Option<Result<(), CoreError>> {
@@ -557,6 +602,13 @@ impl DisposeCompletion {
         let waiters = mem::take(&mut *lock(&self.inner.waiters));
         for waiter in waiters {
             waiter.wake();
+        }
+    }
+
+    fn wake_context_wakers(&self) {
+        let wakers = mem::take(&mut lock(&self.inner.context).wakers);
+        for waker in wakers {
+            waker.wake();
         }
     }
 }
@@ -591,22 +643,60 @@ fn register_waker(waiters: &mut Vec<Waker>, waker: &Waker) {
     }
 }
 
+#[derive(Default)]
+struct DisposalContextState {
+    ancestors: Vec<ScopeId>,
+    wakers: Vec<Waker>,
+}
+
 thread_local! {
     static DISPOSING_SCOPES: RefCell<Vec<ScopeId>> = const { RefCell::new(Vec::new()) };
+    static DISPOSAL_CONTEXTS: RefCell<Vec<Arc<Mutex<DisposalContextState>>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn disposing_scopes() -> Vec<ScopeId> {
+    let mut scopes = DISPOSAL_CONTEXTS.with(|contexts| {
+        let contexts = contexts.borrow();
+        let mut scopes = Vec::new();
+        for context in contexts.iter() {
+            for id in &lock(context).ancestors {
+                if !scopes.contains(id) {
+                    scopes.push(*id);
+                }
+            }
+        }
+        scopes
+    });
+    DISPOSING_SCOPES.with(|disposing_scopes| {
+        for id in disposing_scopes.borrow().iter() {
+            if !scopes.contains(id) {
+                scopes.push(*id);
+            }
+        }
+    });
+    scopes
 }
 
 fn is_disposing(id: ScopeId) -> bool {
     DISPOSING_SCOPES.with(|scopes| scopes.borrow().contains(&id))
+        || DISPOSAL_CONTEXTS.with(|contexts| {
+            contexts
+                .borrow()
+                .iter()
+                .any(|context| lock(context).ancestors.contains(&id))
+        })
 }
 
 struct DisposalContext<F> {
+    context: Arc<Mutex<DisposalContextState>>,
     id: ScopeId,
     future: Pin<Box<F>>,
 }
 
 impl<F> DisposalContext<F> {
-    fn new(id: ScopeId, future: F) -> Self {
+    fn new(context: Arc<Mutex<DisposalContextState>>, id: ScopeId, future: F) -> Self {
         Self {
+            context,
             id,
             future: Box::pin(future),
         }
@@ -620,27 +710,47 @@ impl<F: Future> Future for DisposalContext<F> {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let _guard = DisposalScopeGuard::enter(this.id);
+        let _guard = DisposalScopeGuard::enter(Arc::clone(&this.context), this.id, context.waker());
         this.future.as_mut().poll(context)
     }
 }
 
 struct DisposalScopeGuard {
-    id: ScopeId,
+    context: Arc<Mutex<DisposalContextState>>,
+    scope_count: usize,
 }
 
 impl DisposalScopeGuard {
-    fn enter(id: ScopeId) -> Self {
-        DISPOSING_SCOPES.with(|scopes| scopes.borrow_mut().push(id));
-        Self { id }
+    fn enter(context: Arc<Mutex<DisposalContextState>>, id: ScopeId, waker: &Waker) -> Self {
+        let scope_count = {
+            let mut disposal_context = lock(&context);
+            register_waker(&mut disposal_context.wakers, waker);
+            DISPOSING_SCOPES.with(|disposing_scopes| {
+                let mut disposing_scopes = disposing_scopes.borrow_mut();
+                disposing_scopes.extend_from_slice(&disposal_context.ancestors);
+                disposing_scopes.push(id);
+            });
+            disposal_context.ancestors.len() + 1
+        };
+        DISPOSAL_CONTEXTS.with(|contexts| contexts.borrow_mut().push(Arc::clone(&context)));
+        Self {
+            context,
+            scope_count,
+        }
     }
 }
 
 impl Drop for DisposalScopeGuard {
     fn drop(&mut self) {
-        DISPOSING_SCOPES.with(|scopes| {
-            let popped = scopes.borrow_mut().pop();
-            debug_assert_eq!(popped, Some(self.id));
+        DISPOSAL_CONTEXTS.with(|contexts| {
+            let popped = contexts.borrow_mut().pop();
+            debug_assert!(matches!(popped, Some(popped) if Arc::ptr_eq(&popped, &self.context)));
+        });
+        DISPOSING_SCOPES.with(|disposing_scopes| {
+            let mut disposing_scopes = disposing_scopes.borrow_mut();
+            for _ in 0..self.scope_count {
+                disposing_scopes.pop();
+            }
         });
     }
 }

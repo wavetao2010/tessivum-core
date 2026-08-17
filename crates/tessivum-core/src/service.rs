@@ -201,11 +201,14 @@ impl Registry {
             if state.committed {
                 return;
             }
-            for (service, entry) in &state.providers {
-                parent.insert(service.clone(), entry.clone());
+            let providers = std::mem::take(&mut state.providers);
+            let mut services = Vec::with_capacity(providers.len());
+            for (service, entry) in providers {
+                parent.insert(service.clone(), entry);
+                services.push(service);
             }
             state.committed = true;
-            state.providers.keys().cloned().collect::<Vec<_>>()
+            services
         };
         for service in services {
             parent.notify(&service);
