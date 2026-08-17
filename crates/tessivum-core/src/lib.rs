@@ -3,21 +3,29 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod config;
 mod context;
 mod error;
 mod events;
 mod ids;
 mod lifecycle;
+pub mod loader;
 mod service;
 
+pub use config::{evaluate_config, ConfigExpression, ConfigScope};
 pub use context::ContextHandle;
-pub use error::CoreError;
+pub use error::{CoreError, LoaderError};
 pub use events::{
     DispatchDiagnostic, DispatchMode, DispatchOutcome, DynamicEvent, EventBus, EventFuture,
     EventKey, EventOptions, EventResult, EventValue, ListenerHandle, WaterfallNext,
 };
 pub use ids::{FiberId, Generation, RealmLabel, ResourceId, ScopeId, ServiceKey};
 pub use lifecycle::{BoxDisposer, CancellationToken, EffectMeta, Fiber, FiberState, Scope};
+pub use loader::{
+    apply_entry_patches, parse_entry_tree, persist_entry_tree, Entry, EntryGroup, EntryId,
+    EntryOptions, EntryTree, HmrDriver, Loader, LoaderFuture, LoaderResult, LoaderRuntime,
+    PackageResolver, Patch, ResolvedPackage, RuntimeHandle, RuntimeKind,
+};
 pub use service::{
     Dependency, DependencySnapshot, DependencySubscription, ServiceHandle, ServiceSnapshot,
 };

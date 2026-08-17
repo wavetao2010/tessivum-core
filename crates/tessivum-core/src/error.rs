@@ -98,3 +98,100 @@ impl Error for CoreError {
         }
     }
 }
+
+/// A configuration, package-resolution, or loader transaction failure.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LoaderError {
+    Parse(String),
+    Validation(String),
+    Expression(String),
+    Patch(String),
+    MissingEntry(crate::EntryId),
+    Persistence(String),
+    Runtime {
+        stage: &'static str,
+        entry: crate::EntryId,
+        name: Option<String>,
+        message: String,
+    },
+    Aggregate(Vec<LoaderError>),
+    Transaction {
+        failure: Box<LoaderError>,
+        rollback: Vec<LoaderError>,
+    },
+}
+
+impl LoaderError {
+    pub fn aggregate(errors: impl IntoIterator<Item = Self>) -> Self {
+        let mut errors = errors.into_iter().collect::<Vec<_>>();
+        if errors.len() == 1 {
+            errors.pop().expect("one error")
+        } else {
+            Self::Aggregate(errors)
+        }
+    }
+
+    pub fn transaction(failure: Self, rollback: Vec<Self>) -> Self {
+        if rollback.is_empty() {
+            failure
+        } else {
+            Self::Transaction {
+                failure: Box::new(failure),
+                rollback,
+            }
+        }
+    }
+
+    pub fn rollback_errors(&self) -> &[Self] {
+        match self {
+            Self::Transaction { rollback, .. } => rollback,
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn in_entry(self, stage: &'static str, entry: &crate::Entry) -> Self {
+        Self::Runtime {
+            stage,
+            entry: entry.options.id.clone(),
+            name: entry.options.name.clone(),
+            message: self.to_string(),
+        }
+    }
+}
+
+impl fmt::Display for LoaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(message) => write!(formatter, "invalid loader document: {message}"),
+            Self::Validation(message) => {
+                write!(formatter, "invalid loader configuration: {message}")
+            }
+            Self::Expression(message) => write!(formatter, "invalid safe expression: {message}"),
+            Self::Patch(message) => write!(formatter, "invalid loader patch: {message}"),
+            Self::MissingEntry(id) => write!(formatter, "loader entry {id} does not exist"),
+            Self::Persistence(message) => {
+                write!(formatter, "cannot persist loader configuration: {message}")
+            }
+            Self::Runtime {
+                stage,
+                entry,
+                name,
+                message,
+            } => {
+                write!(formatter, "failed to {stage} loader entry {entry}")?;
+                if let Some(name) = name {
+                    write!(formatter, " ({name})")?;
+                }
+                write!(formatter, ": {message}")
+            }
+            Self::Aggregate(errors) => write!(formatter, "{} loader error(s)", errors.len()),
+            Self::Transaction { failure, rollback } => write!(
+                formatter,
+                "loader transaction failed: {failure}; {} rollback error(s)",
+                rollback.len()
+            ),
+        }
+    }
+}
+
+impl Error for LoaderError {}
