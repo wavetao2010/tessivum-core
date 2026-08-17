@@ -5,12 +5,17 @@ use serde_json::Value;
 
 mod context;
 mod error;
+mod events;
 mod ids;
 mod lifecycle;
 mod service;
 
 pub use context::ContextHandle;
 pub use error::CoreError;
+pub use events::{
+    DispatchDiagnostic, DispatchMode, DispatchOutcome, DynamicEvent, EventBus, EventFuture,
+    EventKey, EventOptions, EventResult, EventValue, ListenerHandle, WaterfallNext,
+};
 pub use ids::{FiberId, Generation, RealmLabel, ResourceId, ScopeId, ServiceKey};
 pub use lifecycle::{BoxDisposer, CancellationToken, EffectMeta, Fiber, FiberState, Scope};
 pub use service::{

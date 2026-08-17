@@ -20,6 +20,18 @@ pub enum CoreError {
     ServiceTypeMismatch { key: String },
     /// A service handle was used after its provider changed or was removed.
     StaleServiceHandle { key: String, generation: Generation },
+    /// A listener received a payload whose native contract did not match its event key.
+    EventTypeMismatch {
+        event: String,
+        expected: &'static str,
+    },
+    /// A synchronous dispatch encountered a listener that requires asynchronous dispatch.
+    AsyncEventListener {
+        operation: &'static str,
+        event: String,
+    },
+    /// A waterfall continuation was called more than once.
+    WaterfallContinuationUsed,
 }
 
 impl CoreError {
@@ -65,6 +77,15 @@ impl fmt::Display for CoreError {
                 )
             }
             Self::Cleanup(errors) => write!(formatter, "{} cleanup error(s)", errors.len()),
+            Self::EventTypeMismatch { event, expected } => {
+                write!(formatter, "event {event} expected payload type {expected}")
+            }
+            Self::AsyncEventListener { operation, event } => {
+                write!(formatter, "cannot {operation} event {event} synchronously")
+            }
+            Self::WaterfallContinuationUsed => {
+                formatter.write_str("waterfall continuation already used")
+            }
         }
     }
 }

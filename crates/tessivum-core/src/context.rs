@@ -7,8 +7,8 @@ use crate::{
     service::{
         DependencySnapshot, Realm, Registry, ResolvedDependency, ResolvedService, ServiceHandle,
     },
-    BoxDisposer, CoreError, Dependency, DependencySubscription, RealmLabel, Scope, ServiceKey,
-    ServiceSnapshot,
+    BoxDisposer, CoreError, Dependency, DependencySubscription, EventBus, RealmLabel, Scope,
+    ServiceKey, ServiceSnapshot,
 };
 
 /// A lightweight, immutable service view bound to one ownership scope.
@@ -17,6 +17,7 @@ pub struct ContextHandle {
     scope: Scope,
     registry: Arc<Registry>,
     realms: Arc<BTreeMap<ServiceKey, Realm>>,
+    events: EventBus,
     intercepts: Arc<BTreeMap<ServiceKey, Vec<Value>>>,
 }
 
@@ -48,11 +49,13 @@ impl ContextHandle {
     }
 
     pub fn from_scope(scope: Scope) -> Self {
+        let events = EventBus::new().in_context(&scope);
         Self {
             scope,
             registry: Registry::new(),
             realms: Arc::new(BTreeMap::new()),
             intercepts: Arc::new(BTreeMap::new()),
+            events,
         }
     }
 
@@ -61,13 +64,20 @@ impl ContextHandle {
         self.scope.clone()
     }
 
+    /// Returns this context's filtered view of its shared event bus.
+    pub fn events(&self) -> EventBus {
+        self.events.clone()
+    }
+
     /// Rebinds this immutable view to an existing scope in the same context tree.
     pub fn with_scope(&self, scope: Scope) -> Self {
+        let events = self.events.in_context(&scope);
         Self {
             scope,
             registry: Arc::clone(&self.registry),
             realms: Arc::clone(&self.realms),
             intercepts: Arc::clone(&self.intercepts),
+            events,
         }
     }
 
@@ -89,6 +99,7 @@ impl ContextHandle {
             registry: Arc::clone(&self.registry),
             realms: Arc::new(realms),
             intercepts: Arc::clone(&self.intercepts),
+            events: self.events.clone(),
         }
     }
 
@@ -102,6 +113,7 @@ impl ContextHandle {
             registry: Arc::clone(&self.registry),
             realms: Arc::clone(&self.realms),
             intercepts: Arc::new(intercepts),
+            events: self.events.clone(),
         }
     }
 
