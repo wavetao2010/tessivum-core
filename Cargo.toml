@@ -1,3 +1,17 @@
+[package]
+name = "tessivum-headless-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "tessivum-headless-probe"
+path = "examples/headless-probe/src/main.rs"
+
+[dependencies]
+tessivum-core = { path = "crates/tessivum-core" }
+tokio = { version = "1", features = ["macros", "rt"] }
+
 [workspace]
-members = ["crates/tessivum-core", "crates/tessivum-extism", "crates/tessivum-pdk", "crates/tessivum-node-bridge", "examples/native-minimal", "examples/wasm-minimal"]
+members = ["crates/tessivum-core", "crates/tessivum-extism", "crates/tessivum-pdk", "crates/tessivum-node-bridge", "crates/tessivum-bench", "examples/native-minimal", "examples/wasm-minimal", "examples/runtime-smoke"]
 resolver = "2"

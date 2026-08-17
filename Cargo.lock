@@ -1886,6 +1886,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessivum-bench"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tessivum-core",
+ "tessivum-extism",
+ "tessivum-node-bridge",
+]
+
+[[package]]
 name = "tessivum-core"
 version = "0.1.0"
 dependencies = [
@@ -1903,6 +1913,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tessivum-core",
+]
+
+[[package]]
+name = "tessivum-headless-probe"
+version = "0.1.0"
+dependencies = [
+ "tessivum-core",
+ "tokio",
 ]
 
 [[package]]
@@ -1930,6 +1948,17 @@ dependencies = [
  "extism-pdk",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "tessivum-runtime-smoke"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tessivum-core",
+ "tessivum-extism",
+ "tessivum-node-bridge",
+ "tokio",
 ]
 
 [[package]]

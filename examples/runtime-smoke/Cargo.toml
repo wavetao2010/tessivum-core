@@ -1,0 +1,13 @@
+[package]
+name = "tessivum-runtime-smoke"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+
+[dependencies]
+serde_json = "1"
+tessivum-core = { path = "../../crates/tessivum-core" }
+tessivum-extism = { path = "../../crates/tessivum-extism" }
+tessivum-node-bridge = { path = "../../crates/tessivum-node-bridge" }
+tokio = { version = "1", features = ["macros", "rt"] }

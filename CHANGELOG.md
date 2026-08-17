@@ -1,0 +1,76 @@
+# Changelog
+
+All notable changes to Tessivum Core are documented here.
+
+The repository follows the pre-1.0 compatibility policy in
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
+independently of crate/repository releases.
+
+## 0.1.0 — 2026-08-17
+
+First release of the Core runtime surface.
+
+### Core
+
+- Added scoped asynchronous ownership with `Scope`, `Fiber`, cancellation,
+  reverse-order cleanup, rollback of failed setup, cleanup aggregation, and
+  lifecycle diagnostics.
+- Added immutable `ContextHandle` views, typed generation-checked services,
+  dependency readiness subscriptions, private/shared service realms, and
+  intercept diagnostics.
+- Added typed and dynamic events with `emit`, `parallel`, `serial`, `bail`,
+  and waterfall dispatch; registrations are scope-owned and dispatch
+  diagnostics are available.
+- Added JSON/YAML `EntryTree` parsing and validation, detached entry patches,
+  atomic same-directory persistence, restricted configuration expressions, and
+  transactional `Loader` replacement/update/unload behavior.
+
+### Runtimes
+
+- Added the in-process `NativePlugin` lifecycle and `NativePluginRuntime` Loader
+  adapter. Native descriptors validate dependencies and a closed typed JSON
+  configuration schema before lifecycle effects.
+- Added `tessivum-extism` and `tessivum-pdk` for the exact
+  `cordis.plugin/v1` ABI: five lifecycle exports, JSON request/response/error
+  envelopes, manifest/schema checks, capability authorization, Extism limits,
+  serialized calls, cancellation, and stop-time binding invalidation.
+- Added `tessivum-node-bridge` and the Bun compat-host for the exact
+  `cordis.node/v1` transport: bounded length-prefixed frames, handshake,
+  generation checks, request/response/error/cancel, supervision, and
+  generation-owned cleanup. The bridge runs existing Cordis/npm-style plugins
+  in a separate process; it is not a security sandbox.
+
+### Contracts and documentation
+
+- Established `tessivum.conformance/v1` as the fixture schema identifier.
+- Established `cordis.plugin/v1` as the WASM ABI and `cordis.node/v1` as the
+  legacy Node bridge protocol. Cross-runtime service contracts use their own
+  `name@contract-version` identifiers.
+- Added public API, protocol, security-review, and compatibility/migration
+  documentation in `docs/`.
+- Added Native and Rust WASM minimal examples. The Native example exercises
+  provider/consumer dependencies, typed events, provider replacement, reload,
+  and root disposal; the Rust WASM example exports all v1 lifecycle functions.
+
+### Security notes
+
+- Native plugins are fully trusted host-process code.
+- WASM capabilities are deny-by-default and require manifest declaration, host
+  grant, and a registered handler.
+- Node frame/queue/process controls provide protocol and failure isolation, not
+  privilege isolation. Deploy the compat-host with OS/container policy when
+  loading code that is not fully trusted.
+
+### Upgrade notes
+
+- This is the first release; there is no prior Tessivum Core release migration.
+- Use the canonical Loader fields `package` and `runtime: legacy-node` when
+  writing configuration. Parser-only aliases (`module`, `plugin`, `source`, and
+  `legacy_node`) are not canonical persisted output.
+- Update the Rust bridge and Bun compat-host together, restart the supervisor,
+  and discard all old-generation bridge clients and registrations.
+- WASM guests must declare `abi: "cordis.plugin/v1"`, export all five lifecycle
+  functions, and return the PDK's `{ requestId, result }` or
+  `{ requestId, error }` form with a matching request ID. The current host
+  ignores extra response fields, so portable guests must not rely on such
+  fields for v1 behavior.

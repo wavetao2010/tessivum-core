@@ -1,0 +1,160 @@
+{
+  "abi": {
+    "node": "cordis.node/v1",
+    "wasm": "cordis.plugin/v1"
+  },
+  "batchSize": 32,
+  "benchmarks": [
+    {
+      "median": 88,
+      "name": "context_fiber_memory_proxy",
+      "note": "shallow ContextHandle + Fiber layout; excludes allocator and Arc targets",
+      "operationsPerSample": 1,
+      "p95": 88,
+      "samples": [
+        88,
+        88,
+        88
+      ],
+      "unit": "bytes"
+    },
+    {
+      "median": 12250,
+      "name": "native_lifecycle",
+      "operationsPerSample": 1,
+      "p95": 34625,
+      "samples": [
+        12250,
+        1459,
+        34625
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 16000000,
+      "name": "service_lookup",
+      "operationsPerSample": 32,
+      "p95": 16334864,
+      "samples": [
+        3011764,
+        16000000,
+        16334864
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 8000000,
+      "name": "event_emit",
+      "operationsPerSample": 32,
+      "p95": 8827586,
+      "samples": [
+        5818181,
+        8000000,
+        8827586
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 1849375,
+      "name": "wasm_cold_call",
+      "operationsPerSample": 1,
+      "p95": 42463375,
+      "samples": [
+        42463375,
+        1849375,
+        1641458
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 6209,
+      "name": "wasm_warm_call",
+      "operationsPerSample": 1,
+      "p95": 13083,
+      "samples": [
+        13083,
+        6209,
+        5417
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 35464625,
+      "name": "node_bridge_cold",
+      "operationsPerSample": 1,
+      "p95": 187100333,
+      "samples": [
+        187100333,
+        28979250,
+        35464625
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 8330,
+      "name": "node_bridge_warm",
+      "operationsPerSample": 1,
+      "p95": 13544,
+      "samples": [
+        867,
+        8330,
+        13544
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 28126,
+      "name": "node_bridge_batch",
+      "operationsPerSample": 32,
+      "p95": 49158,
+      "samples": [
+        28126,
+        20370,
+        49158
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 152208,
+      "name": "loader_tree",
+      "operationsPerSample": 16,
+      "p95": 190083,
+      "samples": [
+        190083,
+        152208,
+        129416
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 363250,
+      "name": "loader_update",
+      "operationsPerSample": 16,
+      "p95": 363917,
+      "samples": [
+        363917,
+        334375,
+        363250
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 5792,
+      "name": "root_dispose",
+      "operationsPerSample": 32,
+      "p95": 5917,
+      "samples": [
+        5917,
+        5792,
+        5667
+      ],
+      "unit": "ns"
+    }
+  ],
+  "environment": {
+    "profile": "release",
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "uname": "Darwin MacBook-Pro.local 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:49 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T8142 arm64"
+  },
+  "sampleCount": 3
+}

@@ -1,0 +1,97 @@
+{
+  "schemaVersion": "tessivum.differential-report/v1",
+  "generatedAt": "2026-08-17T10:19:40Z",
+  "evidence": {
+    "oracle": {
+      "command": "bun run oracle -- ../fixtures/conformance/<fixture>.json",
+      "workingDirectory": "oracle",
+      "baseline": "Harness-vendored Cordis 56b3d4f725681cf4556c1a8695a709cc3b6eed74",
+      "observed": [
+        {
+          "fixture": "lifecycle.core-catalog",
+          "path": "fixtures/conformance/lifecycle.json",
+          "sha256": "8ee0d6dcd58f593700a5c051bf925eac7edbca365175a86c7413b0b4325b1973",
+          "status": "PASS",
+          "traceEventCount": 7
+        },
+        {
+          "fixture": "service.core-catalog",
+          "path": "fixtures/conformance/services.json",
+          "sha256": "4a1dc2e17242d6398f9ea9097dd05e442ab26423d1b5214b5c3de26795cca8dc",
+          "status": "PASS",
+          "traceEventCount": 14
+        },
+        {
+          "fixture": "event.core-catalog",
+          "path": "fixtures/conformance/events.json",
+          "sha256": "4752e8d81375f51678e5f5e34e7ddaafff0bdfa41cc2418342113aab4576279c",
+          "status": "PASS",
+          "traceEventCount": 6
+        },
+        {
+          "fixture": "loader.core-catalog",
+          "path": "fixtures/conformance/loader.json",
+          "sha256": "558f11c374fce2867b51b5ff4ee2e4dec34aa83188a66fdaeec3ef6c99432d22",
+          "status": "UNSUPPORTED_SCENARIO",
+          "error": "loader/loader-catalog is not supported by the Cordis oracle"
+        }
+      ]
+    },
+    "rust": {
+      "runner": "crates/tessivum-core/src/bin/conformance.rs",
+      "comparison": "The runner normalizes JSON object keys recursively, omits absent optional trace fields in output, and compares each normalized event in order.",
+      "execution": "observed-pass",
+      "reason": "The Rust runner was executed for lifecycle, service, event, and loader catalogs on 2026-08-17; all four returned PASS. Loader uses its real non-empty Rust trace without claiming equality to the unsupported oracle."
+    }
+  },
+  "catalog": [
+    {
+      "domain": "lifecycle",
+      "scenario": "effect-dispose",
+      "oracleStatus": "PASS",
+      "rustPath": "Fiber::start, Scope::add_effect, Fiber::dispose",
+      "expectedComparison": "equal"
+    },
+    {
+      "domain": "service",
+      "scenario": "isolate-realm",
+      "oracleStatus": "PASS",
+      "rustPath": "ContextHandle::provide, ContextHandle::isolate, Fiber::dispose",
+      "expectedComparison": "equal"
+    },
+    {
+      "domain": "event",
+      "scenario": "emit",
+      "oracleStatus": "PASS",
+      "rustPath": "EventBus::on_dynamic, EventBus::emit_dynamic, ListenerHandle::remove",
+      "expectedComparison": "equal"
+    },
+    {
+      "domain": "loader",
+      "scenario": "loader-catalog",
+      "oracleStatus": "UNSUPPORTED_SCENARIO",
+      "rustPath": "Loader::load, Loader::replace, Loader::update, Loader::persist, Loader::unload",
+      "expectedComparison": "Rust PASS with an executed loader trace; oracle comparison unavailable"
+    }
+  ],
+  "intentionalDifferences": [
+    {
+      "id": "loader-current-oracle-gap",
+      "status": "accepted",
+      "oracleBehavior": "The current Cordis oracle returns UNSUPPORTED_SCENARIO for loader/loader-catalog and produces no trace.",
+      "rustBehavior": "The Rust runner executes all ten loader catalog cases, including detached candidate failure, retained rollback failure, ordered patches, nested groups, and atomic persistence. Loader emits config-committed and config-rolled-back observations.",
+      "comparisonImpact": "No cross-runtime equality claim is made. An empty Loader baseline means the Rust runner validates execution and returns PASS with its actual trace, while the report retains the oracle gap.",
+      "rationale": "The Loader implementation is exercised without treating the oracle's missing implementation as either equality or failure.",
+      "removalCondition": "Replace this entry only after the Cordis oracle executes loader/loader-catalog and provides an ordered normalized loader trace."
+    },
+    {
+      "id": "javascript-runtime-model",
+      "status": "accepted",
+      "oracleBehavior": "Cordis consumers may observe JavaScript Proxy, prototype, and arbitrary !!js behavior.",
+      "rustBehavior": "Tessivum exposes explicit Rust values and a constrained safe-expression loader model; legacy !!js stays at the Legacy Node boundary.",
+      "comparisonImpact": "None for the four normalized catalog traces.",
+      "rationale": "These host-language mechanics are not portable core lifecycle, service, event, or loader observations."
+    }
+  ],
+  "verdict": "Lifecycle, service, and event match the Cordis oracle. The Rust lifecycle, service, event, and Loader catalogs all execute successfully; Loader remains a documented oracle comparison gap."
+}
