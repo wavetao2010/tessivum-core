@@ -1915,6 +1915,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessivum-node-bridge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tessivum-core",
+]
+
+[[package]]
 name = "tessivum-pdk"
 version = "0.1.0"
 dependencies = [

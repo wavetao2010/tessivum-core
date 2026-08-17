@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@deepseek-ai/cordis": ["../../../upstream/deepseek-harness/vendor/cordis/src/index.ts"],
+      "@deepseek-ai/cosmokit": ["../../../upstream/deepseek-harness/vendor/cosmokit/src/index.ts"]
+    }
+  }
+}
