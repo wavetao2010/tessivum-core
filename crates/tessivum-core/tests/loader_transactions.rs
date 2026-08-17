@@ -11,7 +11,7 @@ use serde_json::json;
 use tessivum_core::{
     ContextHandle, Entry, EntryGroup, EntryId, EntryOptions, EntryTree, HmrDriver, Loader,
     LoaderError, LoaderFuture, LoaderRuntime, PackageResolver, Patch, ResolvedPackage,
-    RuntimeHandle, RuntimeKind, TraceEventKind,
+    RuntimeHandle, RuntimeKind, ServiceKey, TraceEventKind,
 };
 
 static NEXT_PATH: AtomicU64 = AtomicU64::new(1);
@@ -178,6 +178,7 @@ struct MockState {
     fail_instantiate: Mutex<BTreeSet<String>>,
     fail_activate: Mutex<BTreeSet<String>>,
     fail_dispose: Mutex<BTreeSet<String>>,
+    required_service: Mutex<Option<ServiceKey>>,
     yield_activations: bool,
 }
 
@@ -256,9 +257,14 @@ impl LoaderRuntime for MockRuntime {
         &'a self,
         package: ResolvedPackage,
         entry: Entry,
-        _context: ContextHandle,
+        context: ContextHandle,
     ) -> LoaderFuture<'a, Box<dyn RuntimeHandle>> {
         let state = Arc::clone(&self.state);
+        let required_service = state
+            .required_service
+            .lock()
+            .expect("mock service requirement is available")
+            .clone();
         Box::pin(async move {
             state.record(format!(
                 "instantiate:{}:{}",
@@ -270,9 +276,22 @@ impl LoaderRuntime for MockRuntime {
                     entry.options.id
                 )));
             }
+            if let Some(service) = required_service {
+                if context
+                    .get::<String>(&service)
+                    .map_err(|error| LoaderError::Validation(error.to_string()))?
+                    .is_none()
+                {
+                    return Err(LoaderError::Validation(format!(
+                        "host service {service} is unavailable"
+                    )));
+                }
+                state.record(format!("context:service:{service}"));
+            }
             let handle: Box<dyn RuntimeHandle> = Box::new(MockHandle {
                 id: entry.options.id,
                 state,
+                disposed: false,
             });
             Ok(handle)
         })
@@ -282,14 +301,22 @@ impl LoaderRuntime for MockRuntime {
 struct MockHandle {
     id: EntryId,
     state: Arc<MockState>,
+    disposed: bool,
 }
 
 impl RuntimeHandle for MockHandle {
     fn activate<'a>(&'a mut self) -> LoaderFuture<'a, ()> {
         let id = self.id.clone();
         let state = Arc::clone(&self.state);
+        let disposed = self.disposed;
         Box::pin(async move {
             state.record(format!("activate:start:{id}"));
+            if disposed {
+                state.record(format!("activate:disposed:{id}"));
+                return Err(LoaderError::Validation(format!(
+                    "activation used disposed handle for {id}"
+                )));
+            }
             if state.yield_activations {
                 tokio::task::yield_now().await;
             }
@@ -306,6 +333,7 @@ impl RuntimeHandle for MockHandle {
     }
 
     fn dispose<'a>(&'a mut self) -> LoaderFuture<'a, ()> {
+        self.disposed = true;
         let id = self.id.clone();
         let state = Arc::clone(&self.state);
         Box::pin(async move {
@@ -358,7 +386,7 @@ fn grouped_tree(entries: &[&str]) -> EntryTree {
 }
 
 #[tokio::test]
-async fn loader_imports_and_activates_candidate_before_disposing_old_then_commits_config() {
+async fn loader_imports_candidate_then_disposes_old_before_activation() {
     let state = Arc::new(MockState::default());
     let mut loader = loader(Arc::clone(&state));
     loader
@@ -372,17 +400,25 @@ async fn loader_imports_and_activates_candidate_before_disposing_old_then_commit
         .await
         .expect("replacement candidate imports and activates");
     let calls = state.calls();
-    let candidate_activation = calls
+    let candidate_import = calls
         .iter()
-        .position(|call| call == "activate:ok:new")
-        .expect("replacement candidate activates");
+        .position(|call| call == "instantiate:new:resolved:test/new")
+        .expect("replacement candidate imports");
     let old_disposal = calls
         .iter()
         .position(|call| call == "dispose:old")
-        .expect("previous plugin disposes after successful candidate activation");
+        .expect("previous plugin disposes before candidate activation");
+    let candidate_activation = calls
+        .iter()
+        .position(|call| call == "activate:ok:new")
+        .expect("replacement candidate activates after old disposal");
     assert!(
-        candidate_activation < old_disposal,
-        "the old committed plugin remains live until its replacement imported and activated"
+        candidate_import < old_disposal,
+        "candidate setup stays detached until the committed tree is retired"
+    );
+    assert!(
+        old_disposal < candidate_activation,
+        "a candidate cannot activate against services from the retiring tree"
     );
     assert_eq!(entry_ids(loader.tree()), vec![id("new")]);
     assert_eq!(
@@ -412,7 +448,82 @@ async fn loader_imports_and_activates_candidate_before_disposing_old_then_commit
     );
     assert!(
         calls.iter().any(|call| call == "dispose:new"),
-        "only after candidate success is the previous configuration retired"
+        "the previous configuration retires before the new candidate starts"
+    );
+}
+
+#[tokio::test]
+async fn replacement_disposal_failure_reimports_fresh_old_handles() {
+    let state = Arc::new(MockState::default());
+    state
+        .fail_dispose
+        .lock()
+        .expect("mock failure configuration is available")
+        .insert("old-fails".into());
+    let mut loader = loader(Arc::clone(&state));
+    loader
+        .load(tree(&["old-live", "old-fails"]))
+        .await
+        .expect("initial tree loads");
+    state.clear_calls();
+
+    loader
+        .replace(tree(&["new"]))
+        .await
+        .expect_err("one old disposal rejects the replacement");
+    let calls = state.calls();
+    let candidate_disposal = calls
+        .iter()
+        .position(|call| call == "dispose:new")
+        .expect("active candidate is disposed before restoration");
+    let restoration_import = calls
+        .iter()
+        .position(|call| call == "instantiate:old-live:resolved:test/old-live")
+        .expect("old tree is freshly imported for restoration");
+    assert!(
+        candidate_disposal < restoration_import,
+        "candidate effects are removed before old resources are rebuilt"
+    );
+    assert!(
+        calls.iter().any(|call| call == "dispose:old-live")
+            && calls.iter().any(|call| call == "dispose:old-fails"),
+        "the replacement attempts every old disposal despite one failure"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| *call == "instantiate:old-live:resolved:test/old-live")
+            .count(),
+        1,
+        "the restoration creates one fresh old-live handle after the failed removal"
+    );
+    assert_eq!(
+        calls
+            .iter()
+            .filter(|call| *call == "instantiate:old-fails:resolved:test/old-fails")
+            .count(),
+        1,
+        "the failed old-fails disposal is restored through a fresh handle too"
+    );
+    assert!(
+        calls.iter().any(|call| call == "activate:ok:old-live")
+            && calls.iter().any(|call| call == "activate:ok:old-fails"),
+        "fresh old handles reactivate after their failed replacement"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("activate:disposed:")),
+        "restoration never activates a handle after it has been disposed"
+    );
+    assert_eq!(
+        entry_ids(loader.tree()),
+        vec![id("old-live"), id("old-fails")]
+    );
+    assert_eq!(
+        loader.trace().last().map(|event| &event.kind),
+        Some(&TraceEventKind::ConfigRolledBack),
+        "a restored old tree still records the rejected replacement"
     );
 }
 
@@ -447,7 +558,7 @@ async fn concurrent_group_candidates_all_settle_and_aggregate_rollback_failures(
     let starts = calls
         .iter()
         .enumerate()
-        .filter(|(_, call)| call.starts_with("activate:start:"))
+        .filter(|(_, call)| *call == "activate:start:broken" || *call == "activate:start:settled")
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     let completions = calls
@@ -478,8 +589,21 @@ async fn concurrent_group_candidates_all_settle_and_aggregate_rollback_failures(
         "every candidate handle receives rollback disposal in reverse stable order"
     );
     assert!(
-        !calls.iter().any(|call| call == "dispose:old"),
-        "the old group is never removed until every candidate has settled successfully"
+        calls.iter().any(|call| call == "dispose:old"),
+        "the committed tree retires before the candidate begins activation"
+    );
+    assert!(
+        calls
+            .iter()
+            .any(|call| call == "instantiate:old:resolved:test/old")
+            && calls.iter().any(|call| call == "activate:ok:old"),
+        "a failed candidate activation rebuilds and reactivates the committed tree"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.starts_with("activate:disposed:")),
+        "activation rollback never reuses the retired old handle"
     );
     assert_eq!(entry_ids(loader.tree()), vec![id("old")]);
     assert_eq!(
@@ -525,6 +649,108 @@ async fn import_failure_rolls_back_detached_handles_without_touching_committed_t
         "the known-good tree remains live after a detached import failure"
     );
     assert_eq!(entry_ids(loader.tree()), vec![id("old")]);
+}
+
+#[tokio::test]
+async fn restoration_failures_are_aggregated_with_candidate_cleanup_failures() {
+    let state = Arc::new(MockState::default());
+    state
+        .fail_dispose
+        .lock()
+        .expect("mock failure configuration is available")
+        .insert("old-fails".into());
+    let mut loader = loader(Arc::clone(&state));
+    loader
+        .load(tree(&["old-live", "old-fails"]))
+        .await
+        .expect("initial tree loads");
+    state
+        .fail_dispose
+        .lock()
+        .expect("mock failure configuration is available")
+        .insert("new".into());
+    state
+        .fail_resolve
+        .lock()
+        .expect("mock failure configuration is available")
+        .extend(["test/old-live".into(), "test/old-fails".into()]);
+    state.clear_calls();
+
+    let error = loader
+        .replace(tree(&["new"]))
+        .await
+        .expect_err("cleanup and fresh restoration failures reject the replacement");
+    assert_eq!(
+        error.rollback_errors().len(),
+        3,
+        "candidate cleanup plus each fresh old import failure is retained"
+    );
+    assert!(
+        error.rollback_errors().iter().any(|error| {
+            matches!(
+                error,
+                LoaderError::Runtime {
+                    stage: "dispose",
+                    entry,
+                    ..
+                } if entry == &id("new")
+            )
+        }),
+        "the candidate disposal failure remains a rollback error"
+    );
+    assert_eq!(
+        error
+            .rollback_errors()
+            .iter()
+            .filter(|error| matches!(
+                error,
+                LoaderError::Runtime {
+                    stage: "import",
+                    ..
+                }
+            ))
+            .count(),
+        2,
+        "all fresh old-tree import failures are aggregated into the rollback"
+    );
+    assert_eq!(
+        entry_ids(loader.tree()),
+        vec![id("old-live"), id("old-fails")]
+    );
+}
+
+#[tokio::test]
+async fn detached_candidates_inherit_host_service_realm_and_intercepts() {
+    let state = Arc::new(MockState::default());
+    let service = ServiceKey::new("host-storage", "test/v1");
+    let host = ContextHandle::root()
+        .isolate(service.clone(), None)
+        .intercept(service.clone(), json!({"origin": "host"}));
+    let _provider = host
+        .provide(service.clone(), "available".to_owned())
+        .expect("host provides an isolated service");
+    *state
+        .required_service
+        .lock()
+        .expect("mock service requirement is available") = Some(service.clone());
+    let mut loader = loader(Arc::clone(&state)).with_context(host);
+
+    loader
+        .load(tree(&["consumer"]))
+        .await
+        .expect("candidate resolves the host-provided isolated service");
+    assert!(
+        state
+            .calls()
+            .iter()
+            .any(|call| call == "context:service:host-storage@test/v1"),
+        "the runtime sees services from the context supplied to Loader::with_context"
+    );
+    assert_eq!(
+        loader.context().intercept_config(&service),
+        json!({"origin": "host"}),
+        "the detached candidate keeps host intercept configuration"
+    );
 }
 
 #[tokio::test]

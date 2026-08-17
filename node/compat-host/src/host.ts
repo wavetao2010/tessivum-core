@@ -255,7 +255,7 @@ export class CompatHost {
   receive(frame: Frame) {
     if (frame.kind === 'cancel') return this.cancel(frame)
     this.sequence = this.sequence.then(() => this.dispatch(frame)).catch(error => this.fatal(error))
-    return this.sequence
+    return undefined
   }
 
   private async dispatch(frame: Frame) {
@@ -386,9 +386,17 @@ export class CompatHost {
       const inject = entry?.options && typeof entry.options === 'object' && !Array.isArray(entry.options) ? (entry.options as RecordValue).inject : undefined
       if (inject !== undefined) options.inject = inject
       const entryId = await loader.create(options)
-      const loaderEntry = loader.resolve(entryId)
-      if (!loaderEntry.fiber) throw new BridgeError('PLUGIN_LOAD_FAILED', `loader did not create fiber for ${id}`)
-      this.plugins.set(id, { fiber: loaderEntry.fiber, entry: loaderEntry })
+      try {
+        abortIfNeeded(signal)
+        const loaderEntry = loader.resolve(entryId)
+        if (!loaderEntry.fiber) throw new BridgeError('PLUGIN_LOAD_FAILED', `loader did not create fiber for ${id}`)
+        await loaderEntry.fiber.await()
+        abortIfNeeded(signal)
+        this.plugins.set(id, { fiber: loaderEntry.fiber, entry: loaderEntry })
+      } catch (error) {
+        await loader.remove(entryId)
+        throw error
+      }
     } else {
       const fiber = this.context().plugin(plugin, config) as Fiber
       try {
@@ -430,8 +438,8 @@ export class CompatHost {
     const [id, plugin] = this.plugin(payload)
     if (plugin.entry) await this.loader!.remove(id)
     else await plugin.fiber.dispose()
-    abortIfNeeded(signal)
     this.plugins.delete(id)
+    abortIfNeeded(signal)
     return { pluginId: id, disposed: true }
   }
 
@@ -487,8 +495,8 @@ export class CompatHost {
     const registration = this.registrations.get(registrationId)
     if (!registration) throw new BridgeError('UNKNOWN_REGISTRATION', `registration ${registrationId} is not active`)
     await settled(registration.dispose())
-    abortIfNeeded(signal)
     this.registrations.delete(registrationId)
+    abortIfNeeded(signal)
     return { registrationId, removed: true }
   }
 
@@ -554,8 +562,8 @@ export class CompatHost {
     const registration = this.registrations.get(id)
     if (!registration) throw new BridgeError('UNKNOWN_REGISTRATION', `registration ${id} is not active`)
     await settled(registration.dispose())
-    abortIfNeeded(signal)
     this.registrations.delete(id)
+    abortIfNeeded(signal)
     return { registrationId: id, disposed: true }
   }
 

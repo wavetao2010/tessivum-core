@@ -16,6 +16,7 @@ use crate::{
 pub struct ContextHandle {
     scope: Scope,
     registry: Arc<Registry>,
+    host_registry: Arc<Registry>,
     realms: Arc<BTreeMap<ServiceKey, Realm>>,
     events: EventBus,
     intercepts: Arc<BTreeMap<ServiceKey, Vec<Value>>>,
@@ -50,9 +51,11 @@ impl ContextHandle {
 
     pub fn from_scope(scope: Scope) -> Self {
         let events = EventBus::new().in_context(&scope);
+        let registry = Registry::new();
         Self {
             scope,
-            registry: Registry::new(),
+            registry: Arc::clone(&registry),
+            host_registry: registry,
             realms: Arc::new(BTreeMap::new()),
             intercepts: Arc::new(BTreeMap::new()),
             events,
@@ -75,10 +78,27 @@ impl ContextHandle {
         Self {
             scope,
             registry: Arc::clone(&self.registry),
+            host_registry: Arc::clone(&self.host_registry),
             realms: Arc::clone(&self.realms),
             intercepts: Arc::clone(&self.intercepts),
             events,
         }
+    }
+
+    /// Creates a service staging view which reads host providers while keeping writes local.
+    pub(crate) fn staged(&self) -> Self {
+        Self {
+            scope: self.scope.clone(),
+            registry: Registry::staged(Arc::clone(&self.host_registry)),
+            host_registry: Arc::clone(&self.host_registry),
+            realms: Arc::clone(&self.realms),
+            intercepts: Arc::clone(&self.intercepts),
+            events: self.events.clone(),
+        }
+    }
+
+    pub(crate) fn commit_staged(&self) {
+        self.registry.commit();
     }
 
     /// Creates a child scope without changing service visibility.
@@ -97,6 +117,7 @@ impl ContextHandle {
         Self {
             scope: self.scope.clone(),
             registry: Arc::clone(&self.registry),
+            host_registry: Arc::clone(&self.host_registry),
             realms: Arc::new(realms),
             intercepts: Arc::clone(&self.intercepts),
             events: self.events.clone(),
@@ -111,6 +132,7 @@ impl ContextHandle {
         Self {
             scope: self.scope.clone(),
             registry: Arc::clone(&self.registry),
+            host_registry: Arc::clone(&self.host_registry),
             realms: Arc::clone(&self.realms),
             intercepts: Arc::new(intercepts),
             events: self.events.clone(),
@@ -233,16 +255,14 @@ impl ContextHandle {
             .collect::<Vec<_>>();
         let dependencies: Arc<[ResolvedDependency]> = dependencies.into();
         let listener: Arc<dyn Fn(DependencySnapshot) + Send + Sync> = Arc::new(listener);
-        let id = self
-            .registry
-            .register_listener(Arc::clone(&dependencies), Arc::clone(&listener));
+        let registry = Arc::clone(&self.host_registry);
+        let id = registry.register_listener(Arc::clone(&dependencies), Arc::clone(&listener));
         let subscription = DependencySubscription {
-            registry: Arc::downgrade(&self.registry),
+            registry: Arc::downgrade(&registry),
             id,
             dependencies,
         };
 
-        let registry = Arc::clone(&self.registry);
         let effect: BoxDisposer = Box::new(move || {
             Box::pin(async move {
                 registry.unregister_listener(id);

@@ -1,4 +1,5 @@
 use std::{
+    fs,
     future::Future,
     path::PathBuf,
     pin::Pin,
@@ -19,6 +20,8 @@ use tessivum_core::{
 use tessivum_node_bridge::{
     BridgeClient, ClientConfig, FrameKind, HostCommand, LegacyNodeRuntime, NodeSupervisor,
 };
+
+static NEXT_RACE_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
 struct ThreadWake(thread::Thread);
 
@@ -41,6 +44,14 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
             Poll::Ready(value) => return value,
             Poll::Pending => thread::park(),
         }
+    }
+}
+
+fn wait_for_file(path: &std::path::Path, label: &str) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !path.exists() {
+        assert!(Instant::now() < deadline, "timed out waiting for {label}");
+        thread::sleep(Duration::from_millis(1));
     }
 }
 
@@ -337,6 +348,361 @@ fn loader_runtime_loads_and_unloads_a_real_function_plugin() {
     supervisor
         .shutdown()
         .expect("loader test reaps its real host");
+}
+
+#[test]
+fn cancelled_loader_load_and_delayed_disposers_leave_no_stale_handles() {
+    let race_file = std::env::temp_dir().join(format!(
+        "tessivum-node-bridge-race-{}-{}.ts",
+        std::process::id(),
+        NEXT_RACE_FIXTURE.fetch_add(1, Ordering::Relaxed),
+    ));
+    let loader_marker = race_file.with_extension("started");
+    let loader_release = race_file.with_extension("release");
+    let marker_json = serde_json::to_string(&loader_marker).expect("marker path serializes");
+    let release_json = serde_json::to_string(&loader_release).expect("release path serializes");
+    let race_source = r#"import { Context } from '@deepseek-ai/cordis'
+import { existsSync, writeFileSync } from 'node:fs'
+
+const pause = () => new Promise<void>(resolve => setTimeout(resolve, 500))
+writeFileSync("__MARKER__", 'started')
+while (!existsSync("__RELEASE__")) await pause()
+let patched = false
+
+export default function racePlugin(ctx: any, config: any = {}) {
+  if (config.mode === 'loader') {
+    console.log('race:loader:start')
+    return (async () => {
+      writeFileSync(config.marker, 'started')
+      while (!existsSync(config.release)) await pause()
+      ctx.provide('legacy.race.loader', { active: true })
+      return () => console.log('race:loader:dispose')
+    })()
+  }
+
+  if (config.mode === 'plugin-disposer') {
+    return async () => {
+      console.log('race:plugin-dispose:start')
+      await pause()
+      console.log('race:plugin-dispose:done')
+    }
+  }
+
+  if (config.mode === 'patch' && !patched) {
+    patched = true
+    const prototype = Context.prototype as Record<string, any>
+    const provide = prototype.provide
+    prototype.provide = function (name: string, value: unknown, ...args: unknown[]) {
+      const dispose = provide.call(this, name, value, ...args)
+      if (name !== 'legacy.race.service') return dispose
+      return async () => {
+        console.log('race:service-dispose:start')
+        await pause()
+        await dispose()
+        console.log('race:service-dispose:done')
+      }
+    }
+    const on = prototype.on
+    prototype.on = function (name: string, listener: (...values: unknown[]) => unknown, ...args: unknown[]) {
+      const dispose = on.call(this, name, listener, ...args)
+      if (name !== 'legacy.race.event') return dispose
+      return async () => {
+        console.log('race:registration-dispose:start')
+        await pause()
+        await dispose()
+        console.log('race:registration-dispose:done')
+      }
+    }
+  }
+}
+"#
+    .replace("\"__MARKER__\"", &marker_json)
+    .replace("\"__RELEASE__\"", &release_json);
+    fs::write(&race_file, race_source).expect("delayed legacy race fixture is writable");
+    let race_path = race_file.to_string_lossy().into_owned();
+
+    let supervisor = NodeSupervisor::new(host_command(), ClientConfig::default())
+        .expect("supervisor accepts a Bun host command");
+    let client = supervisor.start().expect("real compat host handshakes");
+    let loader_started = Arc::new(AtomicUsize::new(0));
+    let loader_disposed = Arc::new(AtomicUsize::new(0));
+    let plugin_dispose_started = Arc::new(AtomicUsize::new(0));
+    let plugin_dispose_done = Arc::new(AtomicUsize::new(0));
+    let service_dispose_started = Arc::new(AtomicUsize::new(0));
+    let service_dispose_done = Arc::new(AtomicUsize::new(0));
+    let registration_dispose_started = Arc::new(AtomicUsize::new(0));
+    let registration_dispose_done = Arc::new(AtomicUsize::new(0));
+    let observed_loader_started = Arc::clone(&loader_started);
+    let observed_loader_disposed = Arc::clone(&loader_disposed);
+    let observed_plugin_dispose_started = Arc::clone(&plugin_dispose_started);
+    let observed_plugin_dispose_done = Arc::clone(&plugin_dispose_done);
+    let observed_service_dispose_started = Arc::clone(&service_dispose_started);
+    let observed_service_dispose_done = Arc::clone(&service_dispose_done);
+    let observed_registration_dispose_started = Arc::clone(&registration_dispose_started);
+    let observed_registration_dispose_done = Arc::clone(&registration_dispose_done);
+    client.set_log_handler(move |record| {
+        let record = record.to_string();
+        if record.contains("race:loader:start") {
+            observed_loader_started.fetch_add(1, Ordering::SeqCst);
+        }
+        if record.contains("race:loader:dispose") {
+            observed_loader_disposed.fetch_add(1, Ordering::SeqCst);
+        }
+        if record.contains("race:plugin-dispose:start") {
+            observed_plugin_dispose_started.fetch_add(1, Ordering::SeqCst);
+        }
+        if record.contains("race:plugin-dispose:done") {
+            observed_plugin_dispose_done.fetch_add(1, Ordering::SeqCst);
+        }
+        if record.contains("race:service-dispose:start") {
+            observed_service_dispose_started.fetch_add(1, Ordering::SeqCst);
+        }
+        if record.contains("race:service-dispose:done") {
+            observed_service_dispose_done.fetch_add(1, Ordering::SeqCst);
+        }
+        if record.contains("race:registration-dispose:start") {
+            observed_registration_dispose_started.fetch_add(1, Ordering::SeqCst);
+        }
+        if record.contains("race:registration-dispose:done") {
+            observed_registration_dispose_done.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+
+    let cancelled_loader = client
+        .begin_request(
+            FrameKind::PluginLoad,
+            json!({
+                "pluginId": "race-loader",
+                "package": { "specifier": race_path, "location": race_path },
+                "loader": true,
+                "config": { "mode": "loader", "marker": loader_marker, "release": loader_release },
+            }),
+        )
+        .expect("loader race request reaches the host");
+    wait_for_file(&loader_marker, "loader plugin activation");
+    assert!(
+        cancelled_loader.cancel(),
+        "loader request is still pending at cancellation"
+    );
+    fs::write(&loader_release, b"release").expect("loader activation release is written");
+    assert!(
+        client
+            .request(
+                FrameKind::PluginSnapshot,
+                json!({ "pluginId": "race-loader" }),
+                Duration::from_secs(2),
+            )
+            .is_err(),
+        "cancelled loader plugin has no host handle"
+    );
+    assert_eq!(
+        client
+            .request(
+                FrameKind::PluginSnapshot,
+                json!({ "loader": true }),
+                Duration::from_secs(2),
+            )
+            .expect("loader snapshot follows rollback")["entries"],
+        json!([]),
+        "cancelled loader plugin leaves no loader entry"
+    );
+    assert_eq!(
+        client
+            .request(
+                FrameKind::PluginLoad,
+                json!({
+                    "pluginId": "race-loader",
+                    "package": { "specifier": race_path, "location": race_path },
+                    "loader": true,
+                    "config": { "mode": "loader", "marker": loader_marker, "release": loader_release },
+                }),
+                Duration::from_secs(2),
+            )
+            .expect("rolled-back loader plugin can reload")["state"],
+        "ACTIVE"
+    );
+    assert_eq!(
+        client
+            .request(
+                FrameKind::PluginDispose,
+                json!({ "pluginId": "race-loader" }),
+                Duration::from_secs(2),
+            )
+            .expect("reloaded loader plugin disposes once")["disposed"],
+        true
+    );
+    assert!(
+        client
+            .request(
+                FrameKind::PluginDispose,
+                json!({ "pluginId": "race-loader" }),
+                Duration::from_secs(2),
+            )
+            .is_err(),
+        "reloaded loader plugin cannot double-dispose"
+    );
+
+    load(
+        &client,
+        "race-plugin",
+        &race_path,
+        None,
+        json!({ "mode": "plugin-disposer" }),
+    );
+    assert_eq!(
+        client
+            .request(
+                FrameKind::PluginDispose,
+                json!({ "pluginId": "race-plugin" }),
+                Duration::from_secs(2),
+            )
+            .expect("plugin disposal completes")["disposed"],
+        true
+    );
+    assert!(
+        client
+            .request(
+                FrameKind::PluginSnapshot,
+                json!({ "pluginId": "race-plugin" }),
+                Duration::from_secs(2),
+            )
+            .is_err(),
+        "disposed plugin removes its host handle"
+    );
+    load(
+        &client,
+        "race-plugin",
+        &race_path,
+        None,
+        json!({ "mode": "plugin-disposer" }),
+    );
+    assert_eq!(
+        client
+            .request(
+                FrameKind::PluginDispose,
+                json!({ "pluginId": "race-plugin" }),
+                Duration::from_secs(2),
+            )
+            .expect("reloaded plugin disposes once")["disposed"],
+        true
+    );
+    assert!(
+        client
+            .request(
+                FrameKind::PluginDispose,
+                json!({ "pluginId": "race-plugin" }),
+                Duration::from_secs(2),
+            )
+            .is_err(),
+        "reloaded plugin cannot double-dispose"
+    );
+
+    load(
+        &client,
+        "race-patcher",
+        &race_path,
+        None,
+        json!({ "mode": "patch" }),
+    );
+    client
+        .request(
+            FrameKind::ServiceProvide,
+            json!({
+                "name": "legacy.race.service",
+                "registrationId": "race-service",
+                "value": { "generation": 1 },
+            }),
+            Duration::from_secs(2),
+        )
+        .expect("delayed service registration succeeds");
+    client
+        .request(
+            FrameKind::ServiceRemove,
+            json!({ "registrationId": "race-service" }),
+            Duration::from_secs(2),
+        )
+        .expect("service registration disposes");
+    assert!(
+        client
+            .request(
+                FrameKind::ServiceRemove,
+                json!({ "registrationId": "race-service" }),
+                Duration::from_secs(2),
+            )
+            .is_err(),
+        "disposed service registration is invalidated"
+    );
+    client
+        .request(
+            FrameKind::ServiceProvide,
+            json!({
+                "name": "legacy.race.service",
+                "registrationId": "race-service",
+                "value": { "generation": 2 },
+            }),
+            Duration::from_secs(2),
+        )
+        .expect("removed service registration can be recreated");
+    client
+        .request(
+            FrameKind::ServiceRemove,
+            json!({ "registrationId": "race-service" }),
+            Duration::from_secs(2),
+        )
+        .expect("recreated service registration disposes once");
+    client
+        .request(
+            FrameKind::EventSubscribe,
+            json!({
+                "event": "legacy.race.event",
+                "callbackId": "race-callback",
+                "registrationId": "race-registration",
+            }),
+            Duration::from_secs(2),
+        )
+        .expect("delayed event registration succeeds");
+    client
+        .request(
+            FrameKind::RegistrationDispose,
+            json!({ "registrationId": "race-registration" }),
+            Duration::from_secs(2),
+        )
+        .expect("event registration disposes");
+    assert!(
+        client
+            .request(
+                FrameKind::RegistrationDispose,
+                json!({ "registrationId": "race-registration" }),
+                Duration::from_secs(2),
+            )
+            .is_err(),
+        "disposed event registration is invalidated"
+    );
+    client
+        .request(
+            FrameKind::EventSubscribe,
+            json!({
+                "event": "legacy.race.event",
+                "callbackId": "race-callback",
+                "registrationId": "race-registration",
+            }),
+            Duration::from_secs(2),
+        )
+        .expect("removed event registration can be recreated");
+    client
+        .request(
+            FrameKind::RegistrationDispose,
+            json!({ "registrationId": "race-registration" }),
+            Duration::from_secs(2),
+        )
+        .expect("recreated event registration disposes once");
+
+    supervisor
+        .shutdown()
+        .expect("race host drains without stale resources");
+    fs::remove_file(race_file).expect("temporary race fixture is removed");
+    fs::remove_file(loader_marker).expect("temporary loader marker is removed");
+    fs::remove_file(loader_release).expect("temporary loader release is removed");
 }
 
 #[test]

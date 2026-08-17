@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    evaluate_config, ConfigExpression, ConfigScope, ContextHandle, LoaderError, TraceEvent,
+    evaluate_config, ConfigExpression, ConfigScope, ContextHandle, LoaderError, Scope, TraceEvent,
     TraceEventKind,
 };
 
@@ -548,7 +548,7 @@ impl Loader {
     /// tree. On any failure the old tree remains the committed tree.
     pub async fn replace(&mut self, tree: EntryTree) -> LoaderResult<()> {
         tree.validate()?;
-        let candidate_context = ContextHandle::root();
+        let candidate_context = self.detached_context();
         let mut candidate = match self
             .import_candidates(&tree, candidate_context.clone())
             .await
@@ -559,21 +559,24 @@ impl Loader {
                 return Err(error);
             }
         };
-        let start_errors = activate_all(&mut candidate).await;
-        if start_errors.iter().any(Result::is_err) {
-            let failure = LoaderError::aggregate(start_errors.into_iter().filter_map(Result::err));
-            let rollback = dispose_all(&mut candidate).await;
-            let error = LoaderError::transaction(failure, rollback);
+        let removal_errors = dispose_all(&mut self.live).await;
+        if !removal_errors.is_empty() {
+            let mut rollback = dispose_all(&mut candidate).await;
+            self.restore_committed_tree(&mut rollback).await;
+
+            let error = LoaderError::transaction(LoaderError::aggregate(removal_errors), rollback);
             self.rolled_back(error.to_string());
             return Err(error);
         }
+        self.live.clear();
 
-        let removal_errors = dispose_all(&mut self.live).await;
-        if !removal_errors.is_empty() {
-            let restored = activate_all(&mut self.live).await;
+        let start_errors = activate_all(&mut candidate).await;
+        if start_errors.iter().any(Result::is_err) {
+            let failure = LoaderError::aggregate(start_errors.into_iter().filter_map(Result::err));
             let mut rollback = dispose_all(&mut candidate).await;
-            rollback.extend(restored.into_iter().filter_map(Result::err));
-            let error = LoaderError::transaction(LoaderError::aggregate(removal_errors), rollback);
+            self.restore_committed_tree(&mut rollback).await;
+
+            let error = LoaderError::transaction(failure, rollback);
             self.rolled_back(error.to_string());
             return Err(error);
         }
@@ -638,6 +641,35 @@ impl Loader {
                 LoaderError::aggregate(errors),
                 rollback,
             ))
+        }
+    }
+
+    fn detached_context(&self) -> ContextHandle {
+        self.context.with_scope(Scope::root())
+    }
+
+    async fn restore_committed(&self, context: ContextHandle) -> LoaderResult<Vec<LiveEntry>> {
+        let mut restored = self.import_candidates(&self.tree, context).await?;
+        let activation_errors = activate_all(&mut restored).await;
+        if activation_errors.is_empty() {
+            Ok(restored)
+        } else {
+            let failure =
+                LoaderError::aggregate(activation_errors.into_iter().filter_map(Result::err));
+            let rollback = dispose_all(&mut restored).await;
+            Err(LoaderError::transaction(failure, rollback))
+        }
+    }
+
+    async fn restore_committed_tree(&mut self, rollback: &mut Vec<LoaderError>) {
+        self.live.clear();
+        let restoration_context = self.detached_context();
+        match self.restore_committed(restoration_context.clone()).await {
+            Ok(restored) => {
+                self.live = restored;
+                self.context = restoration_context;
+            }
+            Err(error) => collect_rollback_errors(error, rollback),
         }
     }
 
@@ -743,6 +775,26 @@ async fn dispose_all(entries: &mut [LiveEntry]) -> Vec<LoaderError> {
         }
     }
     errors
+}
+
+fn collect_rollback_errors(error: LoaderError, rollback: &mut Vec<LoaderError>) {
+    match error {
+        LoaderError::Aggregate(errors) => {
+            for error in errors {
+                collect_rollback_errors(error, rollback);
+            }
+        }
+        LoaderError::Transaction {
+            failure,
+            rollback: errors,
+        } => {
+            collect_rollback_errors(*failure, rollback);
+            for error in errors {
+                collect_rollback_errors(error, rollback);
+            }
+        }
+        error => rollback.push(error),
+    }
 }
 
 async fn all_settle<'a, T>(futures: Vec<LoaderFuture<'a, T>>) -> Vec<LoaderResult<T>> {

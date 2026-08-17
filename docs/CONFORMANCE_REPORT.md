@@ -21,30 +21,24 @@ bun run oracle -- ../fixtures/conformance/<fixture>.json
 | `event.core-catalog` | `4752e8d81375f51678e5f5e34e7ddaafff0bdfa41cc2418342113aab4576279c` | `PASS` | 6 |
 | `loader.core-catalog` | `558f11c374fce2867b51b5ff4ee2e4dec34aa83188a66fdaeec3ef6c99432d22` | `UNSUPPORTED_SCENARIO` | — |
 
-The Loader result is an oracle limitation: `loader/loader-catalog is not supported by the Cordis oracle`. It is not evidence of Rust equivalence or failure.
+The Loader result is an oracle limitation: `loader/loader-catalog is not supported by the Cordis oracle`; its empty baseline records that no cross-runtime trace exists.
 
 ## Rust runner
 
-`crates/tessivum-core/src/bin/conformance.rs` executes each supported catalog scenario using public core APIs:
+`crates/tessivum-core/src/bin/conformance.rs` executes **every** `input.cases` record through public core APIs. It emits `executedCases` in fixture order only after every case succeeds; an unknown, missing, or failing case is `EXECUTION_ERROR`.
 
-| Domain | Scenario | APIs exercised |
+| Domain | Declared cases exercised | APIs exercised |
 |---|---|---|
-| Lifecycle | `effect-dispose` | `Fiber::start`, `Scope::add_effect`, `Fiber::dispose` |
-| Service | `isolate-realm` | `ContextHandle::provide`, `ContextHandle::isolate`, `ContextHandle::get`, `Fiber::dispose` |
-| Event | `emit` | `EventBus::on_dynamic`, `EventBus::emit_dynamic`, `ListenerHandle::remove` |
-| Loader | `loader-catalog` | `Loader::load`, `Loader::replace`, `Loader::update`, `Loader::persist`, `Loader::unload` |
+| Lifecycle | all 12: start, cleanup, nested/reverse disposal, repeated/reentrant disposal, rollback, quiescence, unload rejection | `Fiber::start`, `Fiber::dispose`, `Scope::child`, `Scope::add_effect`, `Scope::dispose` |
+| Service | all 9: late/optional dependency, replacement/removal/recovery, isolated/shared realms, intercepts, stale generations | `ContextHandle::subscribe`, `provide`, `get`, `isolate`, `intercept`, `Scope::dispose` |
+| Event | all 11: emit, parallel aggregation, serial/synchronous bail, waterfall next/short-circuit/wrap, prepend, filtering, removals | `EventBus::on_dynamic`, `on_dynamic_async`, `on_dynamic_waterfall`, `emit_dynamic`, `parallel_dynamic`, `serial_dynamic`, `bail_dynamic`, `waterfall_dynamic` |
+| Loader | all 10: unordered dependencies, duplicates, ordered patches, config updates, replacement, rollback failures, groups, persistence | `Loader::load`, `replace`, `update`, `persist`, `unload` |
 
-The Loader catalog executes all ten declared cases: unordered dependencies, duplicate IDs, ordered mutations, config-only updates, replacement, candidate and rollback failures, nested groups, later patch targeting, and atomic persistence.
-
-Before comparison, the runner recursively canonicalizes JSON object keys, preserves array/event order, and emits only present optional trace fields. It compares all normalized records in sequence; an extra, missing, or changed record is `TRACE_MISMATCH`. Supported paths never return `NOT_IMPLEMENTED`.
+Before comparison, the runner recursively canonicalizes JSON object keys, preserves array/event order, and emits only present optional trace fields. Lifecycle, service, and event compare every normalized record in sequence; an extra, missing, or changed record is `TRACE_MISMATCH`. An empty expected trace is rejected as a mismatch outside Loader.
 
 ## Differential result
 
-Lifecycle, service, and event have a current `PASS` oracle trace and are expected to compare equal. Loader is intentionally different:
-
-- The fixture has a reserved empty trace because the current oracle does not execute Loader.
-- Rust deliberately emits Loader transaction observations (`config-committed` and `config-rolled-back`) after executing real Loader operations.
-- Loader returns `PASS` with its actual Rust transaction trace. Because the Cordis oracle has no Loader implementation, this is an execution result rather than a cross-runtime equality claim.
+Lifecycle, service, and event require exact equality with their current `PASS` oracle traces. Loader has an explicitly empty Oracle baseline because its current Oracle result is `UNSUPPORTED_SCENARIO`; after all ten Loader cases execute successfully, Rust reports `PASS` as an execution baseline, never as an accepted `MISMATCH`.
 
 The existing runtime-model differences remain accepted: JavaScript `Proxy`/prototype mechanics and arbitrary `!!js` are not Rust core behavior. Legacy `!!js` remains at the Legacy Node boundary; they do not alter the normalized catalog traces.
 
@@ -54,4 +48,4 @@ The existing runtime-model differences remain accepted: JavaScript `Proxy`/proto
 cargo test -p tessivum-core --test conformance
 ```
 
-The test starts the conformance binary for every catalog fixture and requires `PASS` for lifecycle, service, event, and Loader. On 2026-08-17 the four catalogs were executed successfully; lifecycle, service, and event also match the observed Cordis oracle traces, while Loader retains an explicit oracle comparison gap.
+The release gate starts the conformance binary for all four catalog fixtures, requires `PASS` and successful exit status for every domain, and asserts `executedCases` exactly equals each fixture's declared case IDs. It also mutates a Lifecycle fixture to an empty expected trace and requires `MISMATCH`, so only the explicitly unsupported Loader Oracle baseline receives execution-only `PASS` treatment.

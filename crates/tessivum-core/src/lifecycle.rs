@@ -49,6 +49,8 @@ impl FiberState {
 pub type BoxDisposer =
     Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = Result<(), CoreError>> + Send>> + Send>;
 
+type CleanupFuture = Pin<Box<dyn Future<Output = Result<(), CoreError>> + Send>>;
+
 /// A stable diagnostic description of a registered effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectMeta {
@@ -256,24 +258,9 @@ impl Scope {
     /// Disposes children and local effects once, in reverse registration order.
     pub async fn dispose(&self) -> Result<(), CoreError> {
         match self.claim_disposal() {
-            DisposeClaim::Owner(resources) => {
-                let result =
-                    DisposalContext::new(self.id(), self.dispose_resources(resources)).await;
-                self.inner.completion.complete(result.clone());
-                self.inner
-                    .state
-                    .store(FiberState::Disposed as u8, Ordering::Release);
-                result
-            }
-            DisposeClaim::Join => {
-                if is_disposing(self.id()) {
-                    Ok(())
-                } else {
-                    DisposeWait {
-                        completion: self.inner.completion.clone(),
-                    }
-                    .await
-                }
+            DisposeClaim::Join if is_disposing(self.id()) => Ok(()),
+            DisposeClaim::Owner | DisposeClaim::Join => {
+                std::future::poll_fn(|context| self.inner.completion.wait(context)).await
             }
         }
     }
@@ -294,7 +281,21 @@ impl Scope {
                     .state
                     .store(FiberState::Unloading as u8, Ordering::Release);
                 self.inner.cancellation.cancel();
-                DisposeClaim::Owner(mem::take(&mut *resources))
+
+                let cleanup_resources = mem::take(&mut *resources);
+                let id = self.id();
+                let scope = Arc::downgrade(&self.inner);
+                self.inner.completion.start(Box::pin(async move {
+                    let result =
+                        DisposalContext::new(id, Self::dispose_resources(cleanup_resources)).await;
+                    if let Some(scope) = scope.upgrade() {
+                        scope
+                            .state
+                            .store(FiberState::Disposed as u8, Ordering::Release);
+                    }
+                    result
+                }));
+                DisposeClaim::Owner
             }
         }
     }
@@ -312,10 +313,10 @@ impl Scope {
             mem::take(&mut *resources)
         };
 
-        self.dispose_resources(resources).await
+        Self::dispose_resources(resources).await
     }
 
-    async fn dispose_resources(&self, resources: ScopeResources) -> Result<(), CoreError> {
+    async fn dispose_resources(resources: ScopeResources) -> Result<(), CoreError> {
         let mut errors = Vec::new();
 
         for child in resources.children.into_iter().rev() {
@@ -338,7 +339,7 @@ impl Scope {
 }
 
 enum DisposeClaim {
-    Owner(ScopeResources),
+    Owner,
     Join,
 }
 
@@ -487,10 +488,17 @@ struct DisposeCompletion {
     inner: Arc<DisposeCompletionInner>,
 }
 
-#[derive(Debug)]
 struct DisposeCompletionInner {
     result: Mutex<Option<Result<(), CoreError>>>,
     waiters: Mutex<Vec<Waker>>,
+}
+
+impl std::fmt::Debug for DisposeCompletionInner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DisposeCompletionInner")
+            .finish_non_exhaustive()
+    }
 }
 
 impl DisposeCompletion {
@@ -503,8 +511,49 @@ impl DisposeCompletion {
         }
     }
 
+    fn start(&self, cleanup: CleanupFuture) {
+        let completion = self.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            drop(handle.spawn(async move {
+                completion.complete(cleanup.await);
+            }));
+        } else {
+            drop(std::thread::spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("cleanup runtime initializes");
+                runtime.block_on(async move {
+                    completion.complete(cleanup.await);
+                });
+            }));
+        }
+    }
+
     fn complete(&self, result: Result<(), CoreError>) {
         *lock(&self.inner.result) = Some(result);
+        self.wake_waiters();
+    }
+
+    fn result(&self) -> Option<Result<(), CoreError>> {
+        lock(&self.inner.result).clone()
+    }
+
+    fn wait(&self, context: &mut Context<'_>) -> Poll<Result<(), CoreError>> {
+        if let Some(result) = self.result() {
+            return Poll::Ready(result);
+        }
+
+        let mut waiters = lock(&self.inner.waiters);
+        if let Some(result) = self.result() {
+            Poll::Ready(result)
+        } else {
+            register_waker(&mut waiters, context.waker());
+            Poll::Pending
+        }
+    }
+
+    fn wake_waiters(&self) {
         let waiters = mem::take(&mut *lock(&self.inner.waiters));
         for waiter in waiters {
             waiter.wake();
@@ -516,28 +565,6 @@ impl Clone for DisposeCompletion {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
-        }
-    }
-}
-
-struct DisposeWait {
-    completion: DisposeCompletion,
-}
-
-impl Future for DisposeWait {
-    type Output = Result<(), CoreError>;
-
-    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(result) = lock(&self.completion.inner.result).clone() {
-            return Poll::Ready(result);
-        }
-
-        let mut waiters = lock(&self.completion.inner.waiters);
-        if let Some(result) = lock(&self.completion.inner.result).clone() {
-            Poll::Ready(result)
-        } else {
-            register_waker(&mut waiters, context.waker());
-            Poll::Pending
         }
     }
 }

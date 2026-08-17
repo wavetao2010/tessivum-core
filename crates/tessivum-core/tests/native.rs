@@ -6,6 +6,7 @@ use std::{
         Arc, Mutex,
     },
     task::Poll,
+    time::Duration,
 };
 
 use serde_json::{json, Value};
@@ -29,6 +30,14 @@ type SharedLog = Arc<Mutex<Log>>;
 
 fn provider_service() -> ServiceKey {
     ServiceKey::new("minimal.provider", "native/v1")
+}
+
+fn managed_dependency_service() -> ServiceKey {
+    ServiceKey::new("managed.dependency", "native/v1")
+}
+
+fn managed_service() -> ServiceKey {
+    ServiceKey::new("managed.service", "native/v1")
 }
 
 fn notice_event() -> EventKey<Notice> {
@@ -272,6 +281,168 @@ impl NativePlugin for Probe {
                 .stops
                 .push("probe".into());
             Ok(())
+        })
+    }
+}
+
+struct TimedPlugin {
+    completed: Arc<AtomicUsize>,
+}
+
+impl NativePlugin for TimedPlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "timed".into(),
+            version: "1.0.0".into(),
+            dependencies: Vec::new(),
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        let completed = Arc::clone(&self.completed);
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            completed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct ManagedService(&'static str);
+
+struct FailingUpdatePlugin {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    failed_updates: tokio::sync::mpsc::UnboundedSender<()>,
+    resource_disposals: Arc<AtomicUsize>,
+}
+
+impl NativePlugin for FailingUpdatePlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "failing-update".into(),
+            version: "1.0.0".into(),
+            dependencies: vec![Dependency::Required(managed_dependency_service())],
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        let started = self.started.clone();
+        let resource_disposals = Arc::clone(&self.resource_disposals);
+        Box::pin(async move {
+            context.provide(managed_service(), ManagedService("old"))?;
+            context.scope().add_effect(
+                "managed-resource",
+                Box::new(move || {
+                    Box::pin(async move {
+                        resource_disposals.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                }),
+            )?;
+            let _ = started.send(());
+            Ok(())
+        })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        let failed_updates = self.failed_updates.clone();
+        Box::pin(async move {
+            context.provide(managed_service(), ManagedService("candidate"))?;
+            let _ = failed_updates.send(());
+            Err(NativePluginError::Runtime {
+                package: "failing-update".into(),
+                message: "candidate update fails".into(),
+            })
+        })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+struct StopFailingUpdatePlugin {
+    label: &'static str,
+    resource_disposals: Arc<AtomicUsize>,
+}
+
+impl NativePlugin for StopFailingUpdatePlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "stop-failing-update".into(),
+            version: "1.0.0".into(),
+            dependencies: Vec::new(),
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        let label = self.label;
+        let resource_disposals = Arc::clone(&self.resource_disposals);
+        Box::pin(async move {
+            context.provide(managed_service(), ManagedService(label))?;
+            context.scope().add_effect(
+                "stop-failure-resource",
+                Box::new(move || {
+                    Box::pin(async move {
+                        resource_disposals.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                }),
+            )?;
+            Ok(())
+        })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        let label = self.label;
+        Box::pin(async move {
+            if label == "old" {
+                Err(NativePluginError::Runtime {
+                    package: "stop-failing-update".into(),
+                    message: "old stop fails".into(),
+                })
+            } else {
+                Ok(())
+            }
         })
     }
 }
@@ -642,6 +813,225 @@ async fn native_loader_runs_provider_consumer_removal_replacement_and_root_dispo
 }
 
 #[tokio::test]
+async fn native_loader_hooks_run_inside_a_tokio_runtime() {
+    let completed = Arc::new(AtomicUsize::new(0));
+    let mut runtime = NativePluginRuntime::new();
+    runtime
+        .register("native/timed", {
+            let completed = Arc::clone(&completed);
+            move || TimedPlugin {
+                completed: Arc::clone(&completed),
+            }
+        })
+        .expect("timed factory registers");
+    let runtime_for_loader: Arc<dyn LoaderRuntime> = Arc::new(runtime);
+    let mut loader = Loader::try_new(Arc::new(Resolver), [runtime_for_loader])
+        .expect("native runtime registers with the loader");
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        loader.load(EntryTree {
+            entries: vec![entry("timed", "native/timed", Value::Null)],
+            groups: Vec::new(),
+        }),
+    )
+    .await
+    .expect("loader-managed hook settles on its Tokio executor")
+    .expect("Tokio timer completes in the managed native hook");
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
+
+    let root = loader.context();
+    loader.unload().await.expect("timed native hook unloads");
+    root.scope().dispose().await.expect("timed root disposes");
+}
+
+#[tokio::test]
+async fn managed_native_rejected_update_retains_old_service_and_resource() {
+    let (started, mut started_events) = tokio::sync::mpsc::unbounded_channel();
+    let (failed_updates, mut failed_update_events) = tokio::sync::mpsc::unbounded_channel();
+    let resource_disposals = Arc::new(AtomicUsize::new(0));
+    let mut runtime = NativePluginRuntime::new();
+    runtime
+        .register("native/failing-update", {
+            let started = started.clone();
+            let failed_updates = failed_updates.clone();
+            let resource_disposals = Arc::clone(&resource_disposals);
+            move || FailingUpdatePlugin {
+                started: started.clone(),
+                failed_updates: failed_updates.clone(),
+                resource_disposals: Arc::clone(&resource_disposals),
+            }
+        })
+        .expect("failing-update factory registers");
+    let runtime_for_loader: Arc<dyn LoaderRuntime> = Arc::new(runtime);
+    let mut loader = Loader::try_new(Arc::new(Resolver), [runtime_for_loader])
+        .expect("native runtime registers with the loader");
+
+    loader
+        .load(EntryTree {
+            entries: vec![entry("managed", "native/failing-update", Value::Null)],
+            groups: Vec::new(),
+        })
+        .await
+        .expect("missing dependency leaves the managed plugin pending");
+    let root = loader.context();
+    root.provide(managed_dependency_service(), 1_u8)
+        .expect("initial dependency registers");
+    tokio::time::timeout(Duration::from_secs(1), started_events.recv())
+        .await
+        .expect("initial managed plugin starts")
+        .expect("initial start event arrives");
+
+    root.provide(managed_dependency_service(), 2_u8)
+        .expect("dependency generation changes");
+    tokio::time::timeout(Duration::from_secs(1), failed_update_events.recv())
+        .await
+        .expect("candidate update is attempted")
+        .expect("candidate update reports its failure");
+    let service = root
+        .get::<ManagedService>(&managed_service())
+        .expect("managed service lookup succeeds")
+        .expect("failed candidate leaves the old managed service live");
+    assert_eq!(
+        service
+            .with(|service| service.0)
+            .expect("old managed service remains callable"),
+        "old"
+    );
+    assert_eq!(
+        resource_disposals.load(Ordering::SeqCst),
+        0,
+        "failed candidate does not dispose the old resource"
+    );
+
+    loader
+        .unload()
+        .await
+        .expect("old managed instance unloads after the rejected update");
+    assert_eq!(resource_disposals.load(Ordering::SeqCst), 1);
+    root.scope()
+        .dispose()
+        .await
+        .expect("managed test root disposes");
+}
+
+#[tokio::test]
+async fn native_update_waits_for_missing_required_dependency_and_cancels() {
+    let log = Arc::new(Mutex::new(Log::default()));
+    let root = ContextHandle::root();
+    let mut provider = NativePluginInstance::instantiate(
+        Box::new(Provider {
+            label: "gate",
+            log: Arc::clone(&log),
+        }),
+        root.clone(),
+        json!({"label": "gate"}),
+    )
+    .expect("provider instantiates");
+    provider.start().await.expect("provider starts");
+
+    let factory = Arc::new({
+        let log = Arc::clone(&log);
+        move || {
+            Box::new(Consumer {
+                log: Arc::clone(&log),
+                dependencies: vec![Dependency::Required(provider_service())],
+                on_start: None,
+            }) as Box<dyn NativePlugin>
+        }
+    });
+    let mut consumer =
+        NativePluginInstance::instantiate_with_factory(factory, root.clone(), Value::Null)
+            .expect("consumer instantiates");
+    consumer.start().await.expect("consumer starts");
+    provider.dispose().await.expect("provider stops");
+
+    let mut update = Box::pin(consumer.update(Value::Null));
+    poll_fn(|context| match update.as_mut().poll(context) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(result) => {
+            panic!("candidate started without its required provider: {result:?}")
+        }
+    })
+    .await;
+    root.scope()
+        .dispose()
+        .await
+        .expect("disposing the host cancels the pending candidate");
+    assert!(matches!(
+        update.await,
+        Err(NativePluginError::Core(CoreError::Cancelled))
+    ));
+    assert_eq!(
+        log.lock().expect("shared log is available").starts,
+        ["provider:gate", "consumer:gate"],
+        "pending candidate never enters update or start"
+    );
+}
+
+#[tokio::test]
+async fn native_update_keeps_candidate_live_when_old_stop_fails() {
+    let resource_disposals = Arc::new(AtomicUsize::new(0));
+    let sequence = Arc::new(AtomicUsize::new(0));
+    let factory = Arc::new({
+        let resource_disposals = Arc::clone(&resource_disposals);
+        let sequence = Arc::clone(&sequence);
+        move || {
+            let label = if sequence.fetch_add(1, Ordering::SeqCst) == 0 {
+                "old"
+            } else {
+                "candidate"
+            };
+            Box::new(StopFailingUpdatePlugin {
+                label,
+                resource_disposals: Arc::clone(&resource_disposals),
+            }) as Box<dyn NativePlugin>
+        }
+    });
+    let root = ContextHandle::root();
+    let mut instance =
+        NativePluginInstance::instantiate_with_factory(factory, root.clone(), Value::Null)
+            .expect("stop-failing plugin instantiates");
+    instance.start().await.expect("old plugin starts");
+    let old_service = root
+        .get::<ManagedService>(&managed_service())
+        .expect("old service lookup succeeds")
+        .expect("old service is present");
+
+    assert!(matches!(
+        instance.update(Value::Null).await,
+        Err(NativePluginError::Runtime { message, .. }) if message == "old stop fails"
+    ));
+    assert!(
+        !old_service.is_current(),
+        "committing the candidate invalidates only the retired provider"
+    );
+    let service = root
+        .get::<ManagedService>(&managed_service())
+        .expect("candidate service lookup succeeds")
+        .expect("candidate service remains current after old cleanup fails");
+    assert_eq!(
+        service
+            .with(|service| service.0)
+            .expect("candidate service remains callable"),
+        "candidate"
+    );
+    assert_eq!(
+        resource_disposals.load(Ordering::SeqCst),
+        1,
+        "only the retired resource is cleaned up"
+    );
+    assert!(
+        !instance.snapshot().fiber.resources.is_empty(),
+        "the ready candidate still owns its resources"
+    );
+
+    instance.dispose().await.expect("candidate disposes");
+    assert_eq!(resource_disposals.load(Ordering::SeqCst), 2);
+    root.scope().dispose().await.expect("root disposes");
+}
+
+#[tokio::test]
 async fn native_instances_validate_rollback_update_and_dispose_without_resources() {
     let descriptor = NativePluginDescriptor {
         name: "schema-probe".into(),
@@ -687,11 +1077,18 @@ async fn native_instances_validate_rollback_update_and_dispose_without_resources
     let log = Arc::new(Mutex::new(Log::default()));
     let cleanups = Arc::new(AtomicUsize::new(0));
     let root = ContextHandle::root();
-    let mut instance = NativePluginInstance::instantiate(
-        Box::new(Probe {
-            log: Arc::clone(&log),
-            cleanups: Arc::clone(&cleanups),
-        }),
+    let factory = Arc::new({
+        let log = Arc::clone(&log);
+        let cleanups = Arc::clone(&cleanups);
+        move || {
+            Box::new(Probe {
+                log: Arc::clone(&log),
+                cleanups: Arc::clone(&cleanups),
+            }) as Box<dyn NativePlugin>
+        }
+    });
+    let mut instance = NativePluginInstance::instantiate_with_factory(
+        factory,
         root.clone(),
         json!({"enabled": true}),
     )

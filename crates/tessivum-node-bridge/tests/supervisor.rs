@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::Write,
     os::unix::net::UnixStream,
     path::PathBuf,
@@ -7,7 +8,7 @@ use std::{
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde_json::json;
@@ -25,6 +26,24 @@ fn host_command() -> HostCommand {
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
         .current_dir(root.join("node/compat-host"))
+}
+
+extern "C" {
+    fn kill(process: i32, signal: i32) -> i32;
+}
+
+struct GrandchildGuard(u32);
+
+impl Drop for GrandchildGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = kill(self.0 as i32, 9);
+        }
+    }
+}
+
+fn process_is_alive(process: u32) -> bool {
+    unsafe { kill(process as i32, 0) == 0 }
 }
 
 #[test]
@@ -215,4 +234,247 @@ fn cancellation_is_first_wins_and_a_late_response_cannot_reopen_the_correlation(
     );
     client.close();
     host.join().expect("test host thread settles");
+}
+
+#[test]
+fn cleanup_panic_does_not_prevent_later_generation_cleanup() {
+    let supervisor = NodeSupervisor::new(host_command(), ClientConfig::default())
+        .expect("supervisor accepts a Bun host command");
+    supervisor.start().expect("real compat host handshakes");
+    let generation = supervisor.generation().expect("host generation is active");
+    let completed = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&completed);
+    supervisor
+        .register_cleanup(generation, || panic!("first cleanup deliberately panics"))
+        .expect("panicking cleanup registers");
+    supervisor
+        .register_cleanup(generation, move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("later cleanup registers");
+
+    supervisor
+        .shutdown()
+        .expect("a cleanup panic cannot abort graceful shutdown");
+    assert_eq!(completed.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn host_command_redacts_values_and_clears_ambient_environment() {
+    let debug = format!(
+        "{:?}",
+        HostCommand::new("bun").env("TESSIVUM_TEST_API_KEY", "top-secret-value")
+    );
+    assert!(!debug.contains("top-secret-value"));
+
+    let secret_key = format!("TESSIVUM_AMBIENT_SECRET_{}", std::process::id());
+    std::env::set_var(&secret_key, "ambient-secret");
+    let script = [
+        r#"const secretKey = "#,
+        &serde_json::to_string(&secret_key).expect("secret key serializes for Bun"),
+        r#";
+let buffered = Buffer.alloc(0);
+let generation = 0;
+function send(kind, requestId, payload, exitAfter = false) {
+  const frame = { protocolVersion: "cordis.node/v1", connectionGeneration: generation, kind, payload };
+  if (requestId !== undefined) frame.requestId = requestId;
+  const body = Buffer.from(JSON.stringify(frame));
+  const message = Buffer.concat([Buffer.from([(body.length >>> 24) & 255, (body.length >>> 16) & 255, (body.length >>> 8) & 255, body.length & 255]), body]);
+  if (exitAfter) process.stdout.write(message, () => process.exit(0)); else process.stdout.write(message);
+}
+process.stdin.on("data", (chunk) => {
+  buffered = Buffer.concat([buffered, chunk]);
+  while (buffered.length >= 4) {
+    const length = buffered.readUInt32BE(0);
+    if (buffered.length < length + 4) return;
+    const frame = JSON.parse(buffered.subarray(4, length + 4).toString());
+    buffered = buffered.subarray(length + 4);
+    if (frame.kind === "hello") {
+      generation = frame.connectionGeneration;
+      send("ready", undefined, {});
+    } else if (frame.kind === "plugin.snapshot") {
+      send("response", frame.requestId, { allowed: process.env.TESSIVUM_ALLOWED ?? null, ambient: process.env[secretKey] ?? null, path: process.env.PATH ?? null });
+    } else if (frame.kind === "exit") {
+      send("response", frame.requestId, {}, true);
+    }
+  }
+});
+"#,
+    ]
+    .concat();
+    let supervisor = NodeSupervisor::new(
+        HostCommand::new("bun")
+            .arg("-e")
+            .arg(script.as_str())
+            .env("TESSIVUM_ALLOWED", "allowed-value"),
+        ClientConfig::default(),
+    )
+    .expect("supervisor accepts an explicit environment allowlist");
+    let client = supervisor
+        .start()
+        .expect("environment test host handshakes");
+    std::env::remove_var(&secret_key);
+    assert_eq!(
+        client
+            .request(FrameKind::PluginSnapshot, json!({}), Duration::from_secs(1),)
+            .expect("host reports only its allowlisted environment"),
+        json!({ "allowed": "allowed-value", "ambient": null, "path": null })
+    );
+    supervisor
+        .shutdown()
+        .expect("environment test host exits after its exit response");
+}
+
+#[test]
+fn inbound_hello_before_ready_disconnects_without_invoking_handler() {
+    let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
+    let reader = socket.try_clone().expect("client read side clones");
+    let client = BridgeClient::from_io(reader, socket, 31, ClientConfig::default())
+        .expect("client owns the stream pair");
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&calls);
+    client.set_handler(Arc::new(move |_| {
+        observed.fetch_add(1, Ordering::SeqCst);
+        Ok(json!({}))
+    }));
+    let host = thread::spawn(move || {
+        let codec = FrameCodec::default();
+        assert_eq!(
+            codec
+                .read_frame(&mut peer)
+                .expect("client sends hello before the peer frame")
+                .kind,
+            FrameKind::Hello
+        );
+        codec
+            .write_frame(&mut peer, &Frame::hello(31))
+            .expect("peer sends an invalid reciprocal hello");
+    });
+
+    assert!(
+        client.handshake(Duration::from_secs(1)).is_err(),
+        "a peer cannot promote the Rust client with a reciprocal hello"
+    );
+    host.join().expect("test host thread settles");
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn correlated_response_wins_when_peer_closes_immediately_after_writing_it() {
+    let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
+    let reader = socket.try_clone().expect("client read side clones");
+    let client = BridgeClient::from_io(reader, socket, 37, ClientConfig::default())
+        .expect("client owns the stream pair");
+    let host = thread::spawn(move || {
+        let codec = FrameCodec::default();
+        assert_eq!(
+            codec
+                .read_frame(&mut peer)
+                .expect("client sends hello")
+                .kind,
+            FrameKind::Hello
+        );
+        codec
+            .write_frame(&mut peer, &Frame::ready(37))
+            .expect("test host sends ready");
+        let request = codec
+            .read_frame(&mut peer)
+            .expect("client sends a correlated request");
+        codec
+            .write_frame(
+                &mut peer,
+                &Frame::response(
+                    37,
+                    request.request_id.expect("request has an id"),
+                    json!({ "beforeEof": true }),
+                ),
+            )
+            .expect("test host writes the response before dropping the stream");
+    });
+
+    client
+        .handshake(Duration::from_secs(1))
+        .expect("matching ready succeeds");
+    assert_eq!(
+        client
+            .request(
+                FrameKind::PluginSnapshot,
+                json!({ "id": "race" }),
+                Duration::from_secs(1),
+            )
+            .expect("the queued response resolves before EOF disconnects the client"),
+        json!({ "beforeEof": true })
+    );
+    host.join().expect("test host thread settles");
+}
+
+#[test]
+fn shutdown_terminates_bun_grandchildren_with_the_host_process_group() {
+    let pid_file = std::env::temp_dir().join(format!(
+        "tessivum-node-bridge-grandchild-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&pid_file);
+    let script = r#"
+const grandchild = Bun.spawn(["/bin/sleep", "60"]);
+await Bun.write(process.env.TESSIVUM_GRANDCHILD_PID_FILE, String(grandchild.pid));
+let buffered = Buffer.alloc(0);
+let generation = 0;
+function sendReady() {
+  const body = Buffer.from(JSON.stringify({ protocolVersion: "cordis.node/v1", connectionGeneration: generation, kind: "ready", payload: {} }));
+  process.stdout.write(Buffer.concat([Buffer.from([(body.length >>> 24) & 255, (body.length >>> 16) & 255, (body.length >>> 8) & 255, body.length & 255]), body]));
+}
+process.stdin.on("data", (chunk) => {
+  buffered = Buffer.concat([buffered, chunk]);
+  if (buffered.length < 4) return;
+  const length = buffered.readUInt32BE(0);
+  if (buffered.length < length + 4) return;
+  const frame = JSON.parse(buffered.subarray(4, length + 4).toString());
+  buffered = buffered.subarray(length + 4);
+  if (frame.kind === "hello") {
+    generation = frame.connectionGeneration;
+    sendReady();
+  }
+});
+"#;
+    let supervisor = NodeSupervisor::new(
+        HostCommand::new("bun")
+            .arg("-e")
+            .arg(script)
+            .env("TESSIVUM_GRANDCHILD_PID_FILE", &pid_file),
+        ClientConfig {
+            shutdown_timeout: Duration::from_millis(100),
+            ..ClientConfig::default()
+        },
+    )
+    .expect("supervisor accepts the process-tree fixture");
+    supervisor.start().expect("fixture host handshakes");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    let grandchild = loop {
+        match fs::read_to_string(&pid_file) {
+            Ok(pid) => {
+                break pid
+                    .trim()
+                    .parse::<u32>()
+                    .expect("fixture writes a numeric pid")
+            }
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("fixture did not report its grandchild pid: {error}"),
+        }
+    };
+    let _guard = GrandchildGuard(grandchild);
+
+    assert!(
+        supervisor.shutdown().is_err(),
+        "an uncooperative host reaches the bounded termination path"
+    );
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while process_is_alive(grandchild) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !process_is_alive(grandchild),
+        "killing the host process group also kills its Bun grandchild"
+    );
+    let _ = fs::remove_file(pid_file);
 }

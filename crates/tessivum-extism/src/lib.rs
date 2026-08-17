@@ -7,7 +7,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::Path,
+    path::{Component, Path},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Condvar, Mutex,
@@ -161,6 +161,11 @@ impl PluginManifest {
             if value.trim().is_empty() {
                 return Err(manifest_error(format!("{field} must not be blank")));
             }
+        }
+        if !is_confined_entry(Path::new(&self.entry)) {
+            return Err(manifest_error(
+                "entry must be a relative path without traversal",
+            ));
         }
         if !is_semver(&self.version) {
             return Err(manifest_error("version must be a semantic version"));
@@ -428,6 +433,7 @@ pub struct HostBindings {
     permissions: Arc<BTreeSet<Capability>>,
     plugin_id: String,
     alive: Arc<AtomicBool>,
+    max_input_bytes: usize,
     max_output_bytes: usize,
 }
 
@@ -436,6 +442,7 @@ impl HostBindings {
         registry: Arc<CapabilityRegistry>,
         manifest: &PluginManifest,
         alive: Arc<AtomicBool>,
+        max_input_bytes: usize,
         max_output_bytes: usize,
     ) -> Self {
         Self {
@@ -443,6 +450,7 @@ impl HostBindings {
             permissions: Arc::new(manifest.permissions()),
             plugin_id: manifest.id.clone(),
             alive,
+            max_input_bytes,
             max_output_bytes,
         }
     }
@@ -487,20 +495,48 @@ impl HostBindings {
                     move |plugin, inputs, outputs, user_data| {
                         let bindings = user_data.get()?;
                         let bindings = lock(bindings.as_ref()).clone();
-                        let input: Vec<u8> = plugin.memory_get_val(&inputs[0])?;
-                        let response = match serde_json::from_slice::<Value>(&input) {
-                            Ok(payload) => match bindings.invoke(capability, payload) {
-                                Ok(result) => HostResponse::success(result),
-                                Err(error) => HostResponse::failure(error),
-                            },
-                            Err(error) => HostResponse::failure(
-                                PluginError::new(
-                                    "invalid_request",
-                                    "invalid request envelope",
-                                    "host",
-                                )
-                                .with_details(json!({"reason": error.to_string()})),
-                            ),
+                        let response = match plugin.memory_from_val(&inputs[0]) {
+                            Some(handle) => {
+                                let actual = handle.len();
+                                if actual > bindings.max_input_bytes {
+                                    HostResponse::failure(input_limit_error(
+                                        bindings.max_input_bytes,
+                                        actual,
+                                    ))
+                                } else {
+                                    match plugin.memory_bytes(handle) {
+                                        Ok(input) => match serde_json::from_slice::<Value>(input) {
+                                            Ok(payload) => {
+                                                match bindings.invoke(capability, payload) {
+                                                    Ok(result) => HostResponse::success(result),
+                                                    Err(error) => HostResponse::failure(error),
+                                                }
+                                            }
+                                            Err(error) => HostResponse::failure(
+                                                PluginError::new(
+                                                    "invalid_request",
+                                                    "invalid request envelope",
+                                                    "host",
+                                                )
+                                                .with_details(json!({"reason": error.to_string()})),
+                                            ),
+                                        },
+                                        Err(error) => HostResponse::failure(
+                                            PluginError::new(
+                                                "invalid_request",
+                                                "invalid guest memory handle",
+                                                "host",
+                                            )
+                                            .with_details(json!({"reason": error.to_string()})),
+                                        ),
+                                    }
+                                }
+                            }
+                            None => HostResponse::failure(PluginError::new(
+                                "invalid_request",
+                                "invalid guest memory handle",
+                                "host",
+                            )),
                         };
                         let bytes = host_response_bytes(response, bindings.max_output_bytes);
                         plugin.memory_set_val(&mut outputs[0], bytes)?;
@@ -558,10 +594,29 @@ impl WasmPackage {
             )
         })?;
         manifest.validate()?;
-        let entry = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(&manifest.entry);
+        let package_dir = fs::canonicalize(path.parent().unwrap_or_else(|| Path::new(".")))
+            .map_err(|error| {
+                PluginError::new(
+                    "PACKAGE_READ_FAILED",
+                    format!(
+                        "cannot resolve package directory for {}: {error}",
+                        path.display()
+                    ),
+                    "instantiate",
+                )
+            })?;
+        let entry = fs::canonicalize(package_dir.join(&manifest.entry)).map_err(|error| {
+            PluginError::new(
+                "PACKAGE_READ_FAILED",
+                format!("cannot resolve package entry {}: {error}", manifest.entry),
+                "instantiate",
+            )
+        })?;
+        if !entry.starts_with(&package_dir) {
+            return Err(manifest_error(
+                "entry resolves outside its package directory",
+            ));
+        }
         let wasm = fs::read(&entry).map_err(|error| {
             PluginError::new(
                 "PACKAGE_READ_FAILED",
@@ -578,9 +633,15 @@ pub trait GuestCancellation: Send + Sync {
     fn cancel(&self) -> WasmResult<()>;
 }
 
-/// Synchronous guest API. The runtime serializes access to this object.
+/// Synchronous guest API. Engines enforce the output bound before copying
+/// guest memory into host-owned storage.
 pub trait GuestInstance: Send {
-    fn call(&mut self, export: GuestExport, input: &[u8]) -> WasmResult<Vec<u8>>;
+    fn call(
+        &mut self,
+        export: GuestExport,
+        input: &[u8],
+        max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>>;
     fn cancellation(&self) -> Arc<dyn GuestCancellation>;
 }
 
@@ -639,10 +700,20 @@ struct ExtismGuestInstance {
 }
 
 impl GuestInstance for ExtismGuestInstance {
-    fn call(&mut self, export: GuestExport, input: &[u8]) -> WasmResult<Vec<u8>> {
-        self.plugin
-            .call::<Vec<u8>, Vec<u8>>(export.as_str(), input.to_vec())
-            .map_err(|error| extism_error(error.to_string(), export.phase()))
+    fn call(
+        &mut self,
+        export: GuestExport,
+        input: &[u8],
+        max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>> {
+        let output: &[u8] = self
+            .plugin
+            .call(export.as_str(), input)
+            .map_err(|error| extism_error(error.to_string(), export.phase()))?;
+        if output.len() > max_output_bytes {
+            return Err(output_limit_error(max_output_bytes, output.len()));
+        }
+        Ok(output.to_vec())
     }
 
     fn cancellation(&self) -> Arc<dyn GuestCancellation> {
@@ -724,7 +795,12 @@ struct InMemoryGuestInstance {
 }
 
 impl GuestInstance for InMemoryGuestInstance {
-    fn call(&mut self, export: GuestExport, input: &[u8]) -> WasmResult<Vec<u8>> {
+    fn call(
+        &mut self,
+        export: GuestExport,
+        input: &[u8],
+        _max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>> {
         if self.cancellation.cancelled.swap(false, Ordering::AcqRel) {
             return Err(cancelled_error());
         }
@@ -796,6 +872,9 @@ impl WasmPluginInstance {
         config: Value,
     ) -> WasmResult<Self> {
         package.manifest.validate()?;
+        if let Some(wasm) = package.wasm.as_deref() {
+            validate_wasm_exports(wasm)?;
+        }
         limits.validate()?;
         package.manifest.validate_config(&config)?;
         let alive = Arc::new(AtomicBool::new(true));
@@ -803,6 +882,7 @@ impl WasmPluginInstance {
             registry,
             &package.manifest,
             Arc::clone(&alive),
+            limits.max_input_bytes,
             limits.max_output_bytes,
         );
         let guest = engine.instantiate(&package, host.clone(), limits.clone())?;
@@ -994,7 +1074,7 @@ fn call_guest(
         return Err(input_limit_error(limits.max_input_bytes, input.len()));
     }
     let started = Instant::now();
-    let output = guest.call(export, &input);
+    let output = guest.call(export, &input, limits.max_output_bytes);
     if cancellation.is_some_and(|active| active.cancelled.load(Ordering::Acquire)) {
         return Err(cancelled_error());
     }
@@ -1384,12 +1464,22 @@ fn validate_config(schema: &Value, value: &Value, path: &str) -> WasmResult<()> 
 }
 
 fn validate_wasm_exports(wasm: &[u8]) -> WasmResult<()> {
+    PluginBuilder::new(wasm)
+        .compile()
+        .map_err(|error| module_error(format!("module cannot be compiled: {error}")))?;
     let exports = wasm_function_exports(wasm)?;
     for export in GuestExport::ALL {
-        if !exports.contains(export.as_str()) {
-            return Err(PluginError::new(
+        let signature = exports.get(export.as_str()).ok_or_else(|| {
+            PluginError::new(
                 "ABI_EXPORT_MISSING",
                 format!("module does not export {}", export.as_str()),
+                "manifest",
+            )
+        })?;
+        if !signature.0.is_empty() || signature.1 != [0x7f] {
+            return Err(PluginError::new(
+                "ABI_EXPORT_INVALID",
+                format!("module export {} must have type () -> i32", export.as_str()),
                 "manifest",
             ));
         }
@@ -1397,93 +1487,152 @@ fn validate_wasm_exports(wasm: &[u8]) -> WasmResult<()> {
     Ok(())
 }
 
-fn wasm_function_exports(wasm: &[u8]) -> WasmResult<BTreeSet<String>> {
-    if wasm.len() < 8 || &wasm[..4] != b"\0asm" || wasm[4..8] != [1, 0, 0, 0] {
-        return Err(PluginError::new(
-            "MODULE_INVALID",
-            "module is not a supported WebAssembly binary",
-            "manifest",
-        ));
+struct WasmReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    end: usize,
+}
+
+impl<'a> WasmReader<'a> {
+    fn byte(&mut self) -> WasmResult<u8> {
+        if self.offset == self.end {
+            return Err(module_error("truncated WebAssembly section"));
+        }
+        let byte = self.bytes[self.offset];
+        self.offset += 1;
+        Ok(byte)
     }
-    let mut offset = 8;
-    let mut exports = BTreeSet::new();
-    while offset < wasm.len() {
-        let id = wasm_byte(wasm, &mut offset)?;
-        let size = wasm_u32(wasm, &mut offset)? as usize;
-        let end = offset
-            .checked_add(size)
-            .filter(|end| *end <= wasm.len())
-            .ok_or_else(|| {
-                PluginError::new(
-                    "MODULE_INVALID",
-                    "truncated WebAssembly section",
-                    "manifest",
-                )
-            })?;
-        if id == 7 {
-            let count = wasm_u32(wasm, &mut offset)?;
-            for _ in 0..count {
-                let name = wasm_name(wasm, &mut offset)?;
-                let kind = wasm_byte(wasm, &mut offset)?;
-                let _index = wasm_u32(wasm, &mut offset)?;
-                if kind == 0 {
-                    exports.insert(name);
+
+    fn bytes(&mut self, length: usize) -> WasmResult<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(length)
+            .filter(|end| *end <= self.end)
+            .ok_or_else(|| module_error("truncated WebAssembly section"))?;
+        let bytes = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(bytes)
+    }
+
+    fn u32(&mut self) -> WasmResult<u32> {
+        let mut value = 0u32;
+        for index in 0..5 {
+            let byte = self.byte()?;
+            let payload = u32::from(byte & 0x7f);
+            if index == 4 && payload > 0x0f {
+                return Err(module_error("invalid WebAssembly integer"));
+            }
+            value |= payload << (index * 7);
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(module_error("invalid WebAssembly integer"))
+    }
+
+    fn name(&mut self) -> WasmResult<&'a str> {
+        let length = self.u32()? as usize;
+        std::str::from_utf8(self.bytes(length)?)
+            .map_err(|error| module_error(format!("invalid WebAssembly name: {error}")))
+    }
+}
+
+type WasmSignature<'a> = (&'a [u8], &'a [u8]);
+
+fn wasm_function_exports(wasm: &[u8]) -> WasmResult<BTreeMap<String, WasmSignature<'_>>> {
+    let mut reader = WasmReader {
+        bytes: wasm,
+        offset: 0,
+        end: wasm.len(),
+    };
+    if reader.bytes(4)? != b"\0asm" || reader.bytes(4)? != [1, 0, 0, 0] {
+        return Err(module_error("module is not a supported WebAssembly binary"));
+    }
+
+    let mut types = Vec::new();
+    let mut functions = Vec::new();
+    let mut exports = BTreeMap::new();
+    while reader.offset < reader.end {
+        let id = reader.byte()?;
+        let length = reader.u32()? as usize;
+        let end = reader
+            .offset
+            .checked_add(length)
+            .filter(|end| *end <= reader.end)
+            .ok_or_else(|| module_error("truncated WebAssembly section"))?;
+        let mut section = WasmReader {
+            bytes: wasm,
+            offset: reader.offset,
+            end,
+        };
+        match id {
+            1 => {
+                for _ in 0..section.u32()? {
+                    if section.byte()? != 0x60 {
+                        return Err(module_error("unsupported WebAssembly type declaration"));
+                    }
+                    let parameter_count = section.u32()? as usize;
+                    let parameters = section.bytes(parameter_count)?;
+                    let result_count = section.u32()? as usize;
+                    let results = section.bytes(result_count)?;
+                    types.push((parameters, results));
                 }
             }
-            if offset != end {
-                return Err(PluginError::new(
-                    "MODULE_INVALID",
-                    "invalid WebAssembly export section",
-                    "manifest",
-                ));
+            2 => {
+                for _ in 0..section.u32()? {
+                    section.name()?;
+                    section.name()?;
+                    if section.byte()? != 0 {
+                        return Err(module_error("unsupported non-function WebAssembly import"));
+                    }
+                    functions.push(section.u32()?);
+                }
             }
+            3 => {
+                for _ in 0..section.u32()? {
+                    functions.push(section.u32()?);
+                }
+            }
+            7 => {
+                for _ in 0..section.u32()? {
+                    let name = section.name()?.to_owned();
+                    let kind = section.byte()?;
+                    let index = section.u32()?;
+                    if kind == 0 && exports.insert(name, index).is_some() {
+                        return Err(module_error("duplicate WebAssembly export name"));
+                    }
+                }
+            }
+            _ => section.offset = end,
         }
-        offset = end;
-    }
-    Ok(exports)
-}
-
-fn wasm_byte(wasm: &[u8], offset: &mut usize) -> WasmResult<u8> {
-    let byte = wasm.get(*offset).copied().ok_or_else(|| {
-        PluginError::new("MODULE_INVALID", "truncated WebAssembly binary", "manifest")
-    })?;
-    *offset += 1;
-    Ok(byte)
-}
-
-fn wasm_u32(wasm: &[u8], offset: &mut usize) -> WasmResult<u32> {
-    let mut value = 0u32;
-    for shift in (0..35).step_by(7) {
-        let byte = wasm_byte(wasm, offset)?;
-        value |= u32::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Ok(value);
+        if section.offset != end {
+            return Err(module_error("invalid WebAssembly section"));
         }
+        reader.offset = end;
     }
-    Err(PluginError::new(
-        "MODULE_INVALID",
-        "invalid WebAssembly integer",
-        "manifest",
-    ))
+
+    exports
+        .into_iter()
+        .map(|(name, index)| {
+            let type_index = *functions
+                .get(index as usize)
+                .ok_or_else(|| module_error("WebAssembly export has an invalid function index"))?;
+            let signature = types
+                .get(type_index as usize)
+                .ok_or_else(|| module_error("WebAssembly function has an invalid type index"))?;
+            Ok((name, *signature))
+        })
+        .collect()
 }
 
-fn wasm_name(wasm: &[u8], offset: &mut usize) -> WasmResult<String> {
-    let length = wasm_u32(wasm, offset)? as usize;
-    let end = offset
-        .checked_add(length)
-        .filter(|end| *end <= wasm.len())
-        .ok_or_else(|| {
-            PluginError::new("MODULE_INVALID", "truncated WebAssembly name", "manifest")
-        })?;
-    let name = std::str::from_utf8(&wasm[*offset..end]).map_err(|error| {
-        PluginError::new(
-            "MODULE_INVALID",
-            format!("invalid WebAssembly export name: {error}"),
-            "manifest",
-        )
-    })?;
-    *offset = end;
-    Ok(name.to_owned())
+fn module_error(message: impl Into<String>) -> PluginError {
+    PluginError::new("MODULE_INVALID", message, "manifest")
+}
+
+fn is_confined_entry(entry: &Path) -> bool {
+    entry
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn json_size(value: &Value, phase: &str) -> WasmResult<usize> {

@@ -168,18 +168,48 @@ struct Listener {
 struct RegistryState {
     providers: BTreeMap<ResolvedService, ServiceEntry>,
     listeners: BTreeMap<ResourceId, Listener>,
+    committed: bool,
 }
 
 /// Shared, lock-protected native service registry for a context tree.
 pub(crate) struct Registry {
     state: Mutex<RegistryState>,
+    parent: Option<Arc<Self>>,
 }
 
 impl Registry {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(RegistryState::default()),
+            parent: None,
         })
+    }
+
+    pub(crate) fn staged(parent: Arc<Self>) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(RegistryState::default()),
+            parent: Some(parent),
+        })
+    }
+
+    pub(crate) fn commit(&self) {
+        let Some(parent) = &self.parent else {
+            return;
+        };
+        let services = {
+            let mut state = lock(&self.state);
+            if state.committed {
+                return;
+            }
+            for (service, entry) in &state.providers {
+                parent.insert(service.clone(), entry.clone());
+            }
+            state.committed = true;
+            state.providers.keys().cloned().collect::<Vec<_>>()
+        };
+        for service in services {
+            parent.notify(&service);
+        }
     }
 
     pub(crate) fn provide(
@@ -189,14 +219,27 @@ impl Registry {
         value: Arc<dyn Any + Send + Sync>,
     ) -> Generation {
         let generation = next_generation();
-        {
+        let entry = ServiceEntry { generation, value };
+        let parent = {
             let mut state = lock(&self.state);
-            state
-                .providers
-                .insert(service.clone(), ServiceEntry { generation, value });
+            if state.committed {
+                self.parent.clone()
+            } else {
+                state.providers.insert(service.clone(), entry.clone());
+                None
+            }
+        };
+        if let Some(parent) = parent {
+            parent.insert(service.clone(), entry);
+            parent.notify(&service);
+        } else {
+            self.notify(&service);
         }
-        self.notify(&service);
         generation
+    }
+
+    fn insert(&self, service: ResolvedService, entry: ServiceEntry) {
+        lock(&self.state).providers.insert(service, entry);
     }
 
     pub(crate) fn remove_if_current(
@@ -204,17 +247,24 @@ impl Registry {
         service: &ResolvedService,
         generation: Generation,
     ) -> bool {
-        let removed = {
+        let (removed, parent) = {
             let mut state = lock(&self.state);
-            let is_current = state
-                .providers
-                .get(service)
-                .is_some_and(|entry| entry.generation == generation);
-            if is_current {
-                state.providers.remove(service);
+            if state.committed {
+                (false, self.parent.clone())
+            } else {
+                let is_current = state
+                    .providers
+                    .get(service)
+                    .is_some_and(|entry| entry.generation == generation);
+                if is_current {
+                    state.providers.remove(service);
+                }
+                (is_current, None)
             }
-            is_current
         };
+        if let Some(parent) = parent {
+            return parent.remove_if_current(service, generation);
+        }
         if removed {
             self.notify(service);
         }
@@ -222,13 +272,20 @@ impl Registry {
     }
 
     pub(crate) fn entry(&self, service: &ResolvedService) -> Option<ServiceEntry> {
-        lock(&self.state).providers.get(service).cloned()
+        let (entry, parent) = {
+            let state = lock(&self.state);
+            (
+                (!state.committed)
+                    .then(|| state.providers.get(service).cloned())
+                    .flatten(),
+                self.parent.clone(),
+            )
+        };
+        entry.or_else(|| parent.and_then(|parent| parent.entry(service)))
     }
 
     fn is_current(&self, service: &ResolvedService, generation: Generation) -> bool {
-        lock(&self.state)
-            .providers
-            .get(service)
+        self.entry(service)
             .is_some_and(|entry| entry.generation == generation)
     }
 
@@ -237,11 +294,44 @@ impl Registry {
         service: &ResolvedService,
         intercepts: Vec<Value>,
     ) -> ServiceSnapshot {
-        snapshot_from(&lock(&self.state), service, intercepts)
+        match self.entry(service) {
+            Some(entry) => ServiceSnapshot {
+                key: service.key.diagnostic_key(),
+                realm: service.realm.diagnostic_key(),
+                generation: Some(entry.generation),
+                available: true,
+                intercepts,
+            },
+            None => ServiceSnapshot {
+                key: service.key.diagnostic_key(),
+                realm: service.realm.diagnostic_key(),
+                generation: None,
+                available: false,
+                intercepts,
+            },
+        }
     }
 
     pub(crate) fn provider_services(&self) -> Vec<ResolvedService> {
-        lock(&self.state).providers.keys().cloned().collect()
+        let (mut services, parent, committed) = {
+            let state = lock(&self.state);
+            (
+                state.providers.keys().cloned().collect::<Vec<_>>(),
+                self.parent.clone(),
+                state.committed,
+            )
+        };
+        if let Some(parent) = parent {
+            let mut parent_services = parent.provider_services();
+            if !committed {
+                parent_services.append(&mut services);
+            }
+            parent_services.sort();
+            parent_services.dedup();
+            parent_services
+        } else {
+            services
+        }
     }
 
     pub(crate) fn register_listener(

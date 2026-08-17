@@ -102,7 +102,12 @@ struct GateGuest {
 }
 
 impl GuestInstance for GateGuest {
-    fn call(&mut self, export: GuestExport, input: &[u8]) -> WasmResult<Vec<u8>> {
+    fn call(
+        &mut self,
+        export: GuestExport,
+        input: &[u8],
+        _max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>> {
         self.entered
             .send(export)
             .expect("test observes guest entry");
@@ -129,8 +134,60 @@ impl GuestInstance for GateGuest {
 struct ImmediateGuest;
 
 impl GuestInstance for ImmediateGuest {
-    fn call(&mut self, _export: GuestExport, input: &[u8]) -> WasmResult<Vec<u8>> {
+    fn call(
+        &mut self,
+        _export: GuestExport,
+        input: &[u8],
+        _max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>> {
         response(input, json!({ "done": true }))
+    }
+
+    fn cancellation(&self) -> Arc<dyn GuestCancellation> {
+        Arc::new(TestCancellation::default())
+    }
+}
+struct BoundedOutputEngine {
+    seen_limit: Arc<AtomicUsize>,
+    allocation_attempts: Arc<AtomicUsize>,
+}
+
+impl GuestEngine for BoundedOutputEngine {
+    fn instantiate(
+        &self,
+        _package: &WasmPackage,
+        _host: HostBindings,
+        _limits: ResourceLimits,
+    ) -> WasmResult<Box<dyn GuestInstance>> {
+        Ok(Box::new(BoundedOutputGuest {
+            seen_limit: Arc::clone(&self.seen_limit),
+            allocation_attempts: Arc::clone(&self.allocation_attempts),
+        }))
+    }
+}
+
+struct BoundedOutputGuest {
+    seen_limit: Arc<AtomicUsize>,
+    allocation_attempts: Arc<AtomicUsize>,
+}
+
+impl GuestInstance for BoundedOutputGuest {
+    fn call(
+        &mut self,
+        _export: GuestExport,
+        _input: &[u8],
+        max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>> {
+        self.seen_limit.store(max_output_bytes, Ordering::SeqCst);
+        if max_output_bytes < 2 {
+            return Err(PluginError::new(
+                "OUTPUT_LIMIT_EXCEEDED",
+                "guest output exceeds limit",
+                "call",
+            ));
+        }
+        self.allocation_attempts.fetch_add(1, Ordering::SeqCst);
+        Ok(vec![b'{', b'}'])
     }
 
     fn cancellation(&self) -> Arc<dyn GuestCancellation> {
@@ -169,7 +226,12 @@ struct StopGateGuest {
 }
 
 impl GuestInstance for StopGateGuest {
-    fn call(&mut self, export: GuestExport, input: &[u8]) -> WasmResult<Vec<u8>> {
+    fn call(
+        &mut self,
+        export: GuestExport,
+        input: &[u8],
+        _max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>> {
         self.exports
             .lock()
             .expect("export log is available")
@@ -401,6 +463,7 @@ fn resource_limits_are_forwarded_and_reject_oversized_input_and_output() {
             error: None,
         })
     });
+
     let instance = instance(
         Arc::new(engine),
         ResourceLimits {
@@ -413,6 +476,28 @@ fn resource_limits_are_forwarded_and_reject_oversized_input_and_output() {
         .expect_err("output limit rejects oversized guest response");
     assert!(!error.code.is_empty());
     assert_eq!(error.phase, "call");
+}
+#[test]
+fn lifecycle_output_limit_reaches_the_engine_before_output_allocation() {
+    let seen_limit = Arc::new(AtomicUsize::new(0));
+    let allocation_attempts = Arc::new(AtomicUsize::new(0));
+    let instance = instance(
+        Arc::new(BoundedOutputEngine {
+            seen_limit: Arc::clone(&seen_limit),
+            allocation_attempts: Arc::clone(&allocation_attempts),
+        }),
+        ResourceLimits {
+            max_output_bytes: 1,
+            ..ResourceLimits::default()
+        },
+    );
+
+    let error = instance
+        .call(json!({}), Value::Null)
+        .expect_err("engine rejects oversized output before copying it");
+    assert_eq!(error.code, "OUTPUT_LIMIT_EXCEEDED");
+    assert_eq!(seen_limit.load(Ordering::SeqCst), 1);
+    assert_eq!(allocation_attempts.load(Ordering::SeqCst), 0);
 }
 
 #[test]

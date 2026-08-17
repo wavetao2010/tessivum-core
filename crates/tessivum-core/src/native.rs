@@ -5,7 +5,7 @@ use std::{
     future::{poll_fn, Future},
     pin::Pin,
     sync::{Arc, Condvar, Mutex},
-    task::{Context, Poll, Wake, Waker},
+    task::{Poll, Waker},
     thread::{self, JoinHandle},
 };
 
@@ -518,6 +518,7 @@ impl DependencyGate {
 /// One plugin and the fiber which owns every lifecycle-created resource.
 pub struct NativePluginInstance {
     plugin: Box<dyn NativePlugin>,
+    factory: Option<NativePluginFactory>,
     descriptor: NativePluginDescriptor,
     context: ContextHandle,
     config: Value,
@@ -544,11 +545,30 @@ impl NativePluginInstance {
         context: ContextHandle,
         config: Value,
     ) -> NativePluginResult<Self> {
+        Self::instantiate_inner(plugin, None, context, config)
+    }
+
+    /// Creates an instance which can stage a fresh plugin during transactional updates.
+    pub fn instantiate_with_factory(
+        factory: NativePluginFactory,
+        context: ContextHandle,
+        config: Value,
+    ) -> NativePluginResult<Self> {
+        Self::instantiate_inner(factory(), Some(factory), context, config)
+    }
+
+    fn instantiate_inner(
+        plugin: Box<dyn NativePlugin>,
+        factory: Option<NativePluginFactory>,
+        context: ContextHandle,
+        config: Value,
+    ) -> NativePluginResult<Self> {
         let descriptor = plugin.descriptor();
         descriptor.validate_config(&config)?;
         let fiber = Fiber::new(&context.scope(), descriptor.name.clone())?;
         Ok(Self {
             plugin,
+            factory,
             descriptor,
             context,
             config,
@@ -598,7 +618,8 @@ impl NativePluginInstance {
         if self.fiber.state() != FiberState::Pending {
             return Err(invalid_state("start native plugin", self.fiber.state()));
         }
-        self.wait_for_dependencies().await?;
+        let cancellation = self.cancellation();
+        self.wait_for_dependencies(cancellation).await?;
         self.start_attempted = true;
 
         let base = self.context.clone();
@@ -624,46 +645,61 @@ impl NativePluginInstance {
         }
     }
 
-    /// Validates first, then stops the current plugin and runs `update` plus
-    /// `start` in a fresh Fiber transaction. The candidate config commits only
-    /// after both hooks succeed.
+    /// Stages a fresh plugin and Fiber, preserving the active instance until
+    /// the candidate's update and start hooks have both succeeded.
     pub async fn update(&mut self, config: Value) -> NativePluginResult<()> {
         self.descriptor.validate_config(&config)?;
         if self.fiber.state() != FiberState::Active {
             return Err(invalid_state("update native plugin", self.fiber.state()));
         }
+        let factory = self
+            .factory
+            .clone()
+            .ok_or_else(|| NativePluginError::Runtime {
+                package: self.descriptor.name.clone(),
+                message: "transactional updates require an instance factory".into(),
+            })?;
+        let cancellation = self.cancellation();
+        let mut candidate = Self::instantiate_with_factory(factory, self.context.staged(), config)?;
 
-        self.stop_current().await?;
-        self.dependency_gate = None;
-        self.fiber = Fiber::new(&self.context.scope(), self.descriptor.name.clone())?;
-        self.start_attempted = false;
-        self.stopped = false;
-        self.wait_for_dependencies().await?;
+        if let Err(error) = candidate.start_after_update(cancellation).await {
+            return match candidate.dispose().await {
+                Ok(()) => Err(error),
+                Err(cleanup) => Err(NativePluginError::cleanup(vec![error, cleanup])),
+            };
+        }
+        candidate.context.commit_staged();
+        let result = self.stop_current().await;
+        *self = candidate;
+        result
+    }
+
+    async fn start_after_update(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> NativePluginResult<()> {
+        self.wait_for_dependencies(cancellation).await?;
         self.start_attempted = true;
-
-        let candidate = config.clone();
         let base = self.context.clone();
+        let config = &self.config;
         let (plugin, fiber) = (&mut self.plugin, &self.fiber);
         let result = fiber
             .start(|scope| {
                 let context = base.with_scope(scope);
                 async move {
                     plugin
-                        .update(context.clone(), &candidate)
+                        .update(context.clone(), config)
                         .await
                         .map_err(|error| lifecycle_error(error, NativePluginPhase::Update))?;
                     plugin
-                        .start(context, &candidate)
+                        .start(context, config)
                         .await
                         .map_err(|error| lifecycle_error(error, NativePluginPhase::Start))
                 }
             })
             .await;
         match result {
-            Ok(()) => {
-                self.config = config;
-                Ok(())
-            }
+            Ok(()) => Ok(()),
             Err(error) => {
                 self.finish_failed_start(NativePluginError::Core(error))
                     .await
@@ -671,7 +707,10 @@ impl NativePluginInstance {
         }
     }
 
-    async fn wait_for_dependencies(&mut self) -> NativePluginResult<()> {
+    async fn wait_for_dependencies(
+        &mut self,
+        cancellation: CancellationToken,
+    ) -> NativePluginResult<()> {
         if self.dependency_gate.is_none() {
             let context = self.context.with_scope(self.fiber.scope());
             self.dependency_gate = Some(DependencyGate::new(
@@ -682,7 +721,7 @@ impl NativePluginInstance {
         self.dependency_gate
             .as_ref()
             .expect("dependency gate is initialized")
-            .wait(self.fiber.scope().cancellation())
+            .wait(cancellation)
             .await
             .map_err(Into::into)
     }
@@ -855,9 +894,12 @@ impl LoaderRuntime for NativePluginRuntime {
                     package.specifier
                 ))
             })?;
-            let instance =
-                NativePluginInstance::instantiate(factory(), context, entry.options.config)
-                    .map_err(|error| LoaderError::Validation(error.to_string()))?;
+            let instance = NativePluginInstance::instantiate_with_factory(
+                Arc::clone(factory),
+                context,
+                entry.options.config,
+            )
+            .map_err(|error| LoaderError::Validation(error.to_string()))?;
             let handle = NativeRuntimeHandle::new(instance)
                 .map_err(|error| LoaderError::Validation(error.to_string()))?;
             Ok(Box::new(handle) as Box<dyn RuntimeHandle>)
@@ -1087,15 +1129,23 @@ fn run_managed_native(
     control: Arc<ManagedControl>,
     watcher: ManagedWatcher,
 ) -> NativePluginResult<()> {
+    let package = instance.descriptor().name.clone();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| NativePluginError::Runtime {
+            package,
+            message: format!("failed to create Tokio runtime: {error}"),
+        })?;
     let mut active_generations = None;
     loop {
         let (stopping, snapshot) = control.next_snapshot();
         if stopping {
             let mut errors = Vec::new();
-            if let Err(error) = native_block_on(instance.dispose()) {
+            if let Err(error) = native_block_on(&runtime, instance.dispose()) {
                 errors.push(error);
             }
-            if let Err(error) = native_block_on(watcher.dispose()) {
+            if let Err(error) = native_block_on(&runtime, watcher.dispose()) {
                 errors.push(NativePluginError::Core(error));
             }
             return if errors.is_empty() {
@@ -1108,7 +1158,7 @@ fn run_managed_native(
         let generations = required_generations(&snapshot, &dependencies);
         if !snapshot.ready {
             if instance.fiber().state() != FiberState::Pending {
-                if let Err(error) = native_block_on(instance.suspend()) {
+                if let Err(error) = native_block_on(&runtime, instance.suspend()) {
                     control.set_phase(ManagedPhase::Failed, Some(error));
                     continue;
                 }
@@ -1122,7 +1172,7 @@ fn run_managed_native(
         match instance.fiber().state() {
             FiberState::Pending => {
                 control.set_phase(ManagedPhase::Starting, None);
-                match native_block_on(instance.start()) {
+                match native_block_on(&runtime, instance.start()) {
                     Ok(()) => {
                         active_generations = Some(generations);
                         control.set_phase(ManagedPhase::Active, None);
@@ -1132,7 +1182,7 @@ fn run_managed_native(
             }
             FiberState::Active if active_generations.as_ref() != Some(&generations) => {
                 control.set_phase(ManagedPhase::Starting, None);
-                match native_block_on(instance.update(instance.config().clone())) {
+                match native_block_on(&runtime, instance.update(instance.config().clone())) {
                     Ok(()) => {
                         active_generations = Some(generations);
                         control.set_cancellation(instance.cancellation());
@@ -1142,7 +1192,7 @@ fn run_managed_native(
                 }
             }
             FiberState::Active => control.set_phase(ManagedPhase::Active, None),
-            _ => match native_block_on(instance.suspend()) {
+            _ => match native_block_on(&runtime, instance.suspend()) {
                 Ok(()) => {
                     control.set_cancellation(instance.cancellation());
                     control.set_phase(ManagedPhase::Pending, None);
@@ -1153,48 +1203,8 @@ fn run_managed_native(
     }
 }
 
-struct ThreadParker {
-    notified: Mutex<bool>,
-    changed: Condvar,
-}
-
-impl Wake for ThreadParker {
-    fn wake(self: Arc<Self>) {
-        *self
-            .notified
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = true;
-        self.changed.notify_one();
-    }
-}
-
-fn native_block_on<F: Future>(future: F) -> F::Output {
-    let parker = Arc::new(ThreadParker {
-        notified: Mutex::new(false),
-        changed: Condvar::new(),
-    });
-    let waker = Waker::from(Arc::clone(&parker));
-    let mut context = Context::from_waker(&waker);
-    let mut future = Box::pin(future);
-    loop {
-        *parker
-            .notified
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = false;
-        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
-            return value;
-        }
-        let mut notified = parker
-            .notified
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        while !*notified {
-            notified = parker
-                .changed
-                .wait(notified)
-                .unwrap_or_else(|poison| poison.into_inner());
-        }
-    }
+fn native_block_on<F: Future>(runtime: &tokio::runtime::Runtime, future: F) -> F::Output {
+    runtime.block_on(future)
 }
 
 struct NativeRuntimeHandle {

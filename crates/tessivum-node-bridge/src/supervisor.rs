@@ -2,7 +2,8 @@ use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
     io::{Read, Write},
-    path::PathBuf,
+    panic::{catch_unwind, AssertUnwindSafe},
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -12,6 +13,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde_json::{json, Value};
 use tessivum_core::{
@@ -92,6 +96,7 @@ where
 type DisconnectHandler = Arc<dyn Fn(BridgeError) + Send + Sync>;
 type LogHandler = Arc<dyn Fn(Value) + Send + Sync>;
 type PendingReply = Sender<BridgeResult<Value>>;
+type Inbound = (Frame, Sender<()>);
 
 struct ClientInner {
     generation: u64,
@@ -168,11 +173,28 @@ impl ClientInner {
     }
 
     fn dispatch(&self, frame: Frame) {
+        let state = lock(&self.state);
+        let handshaking = matches!(&*state, ConnectionState::Handshaking);
+        let disconnected = matches!(&*state, ConnectionState::Disconnected(_));
+        drop(state);
+        if disconnected {
+            return;
+        }
+        if handshaking && frame.kind != FrameKind::Ready {
+            self.disconnect(BridgeError::Handshake(format!(
+                "received {} instead of ready",
+                frame.kind.as_str()
+            )));
+            return;
+        }
+        if !handshaking && matches!(frame.kind, FrameKind::Hello | FrameKind::Ready) {
+            self.disconnect(BridgeError::Handshake(format!(
+                "received duplicate {} after ready",
+                frame.kind.as_str()
+            )));
+            return;
+        }
         match frame.kind {
-            FrameKind::Hello => {
-                self.mark_ready();
-                let _ = self.send(Frame::ready(self.generation));
-            }
             FrameKind::Ready => self.mark_ready(),
             FrameKind::Heartbeat => *lock(&self.last_heartbeat) = Instant::now(),
             FrameKind::Log => {
@@ -205,6 +227,13 @@ impl ClientInner {
     }
 
     fn dispatch_request(&self, frame: Frame) {
+        if !matches!(&*lock(&self.state), ConnectionState::Ready) {
+            self.disconnect(BridgeError::Handshake(format!(
+                "received {} before ready",
+                frame.kind.as_str()
+            )));
+            return;
+        }
         let request_id = frame.request_id.expect("validated request id");
         let result = lock(&self.handler)
             .clone()
@@ -524,12 +553,19 @@ fn spawn_reader<R: Read + Send + 'static>(
     inner: Arc<ClientInner>,
     codec: FrameCodec,
     mut reader: R,
-    sender: SyncSender<Frame>,
+    sender: SyncSender<Inbound>,
 ) {
     thread::spawn(move || loop {
         match codec.read_frame(&mut reader) {
             Ok(frame) if frame.connection_generation == inner.generation => {
-                if sender.send(frame).is_err() {
+                let (dispatched, handled) = mpsc::channel();
+                if sender.send((frame, dispatched)).is_err() {
+                    inner.disconnect(BridgeError::Disconnected(
+                        "dispatcher thread stopped".into(),
+                    ));
+                    return;
+                }
+                if handled.recv().is_err() {
                     inner.disconnect(BridgeError::Disconnected(
                         "dispatcher thread stopped".into(),
                     ));
@@ -551,16 +587,21 @@ fn spawn_reader<R: Read + Send + 'static>(
     });
 }
 
-fn spawn_dispatcher(inner: Arc<ClientInner>, receiver: Receiver<Frame>) {
+fn spawn_dispatcher(inner: Arc<ClientInner>, receiver: Receiver<Inbound>) {
     thread::spawn(move || {
-        while let Ok(frame) = receiver.recv() {
+        while let Ok((frame, handled)) = receiver.recv() {
             inner.dispatch(frame);
+            let _ = handled.send(());
         }
     });
 }
 
 /// A restartable command line for exactly one Node host profile.
-#[derive(Clone, Debug)]
+///
+/// The child starts with an empty environment; [`HostCommand::env`] is its
+/// explicit allowlist. Unix hosts run in a dedicated process group. Windows
+/// hosts use a kill-on-close job object and fail startup if it cannot attach.
+#[derive(Clone)]
 pub struct HostCommand {
     pub program: PathBuf,
     pub args: Vec<OsString>,
@@ -583,6 +624,7 @@ impl HostCommand {
         self
     }
 
+    /// Allows one environment variable into the otherwise empty child environment.
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.env
             .push((key.as_ref().to_owned(), value.as_ref().to_owned()));
@@ -595,11 +637,166 @@ impl HostCommand {
     }
 }
 
+impl std::fmt::Debug for HostCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostCommand")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field(
+                "env",
+                &self.env.iter().map(|(key, _)| key).collect::<Vec<_>>(),
+            )
+            .field("cwd", &self.cwd)
+            .finish()
+    }
+}
+
 type Cleanup = Box<dyn FnOnce() + Send + 'static>;
+
+#[cfg(unix)]
+struct ProcessTree {
+    process_group: i32,
+}
+
+#[cfg(unix)]
+impl ProcessTree {
+    fn attach(child: &Child) -> BridgeResult<Self> {
+        Ok(Self {
+            process_group: i32::try_from(child.id()).map_err(|_| {
+                BridgeError::Process("Node host process id is outside the POSIX range".into())
+            })?,
+        })
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        terminate_process_group(self.process_group);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(windows)]
+struct ProcessTree {
+    job: usize,
+}
+
+#[cfg(windows)]
+impl ProcessTree {
+    fn attach(child: &Child) -> BridgeResult<Self> {
+        use std::{
+            mem::{size_of, zeroed},
+            os::windows::io::AsRawHandle,
+        };
+
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job.is_null() {
+            return Err(BridgeError::Process(
+                "could not create a Windows job object".into(),
+            ));
+        }
+        let mut limits: JobObjectExtendedLimitInformation = unsafe { zeroed() };
+        limits.basic.limit_flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if unsafe {
+            SetInformationJobObject(
+                job,
+                JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                (&limits as *const JobObjectExtendedLimitInformation).cast(),
+                size_of::<JobObjectExtendedLimitInformation>() as u32,
+            )
+        } == 0
+        {
+            unsafe { CloseHandle(job) };
+            return Err(BridgeError::Process(
+                "could not configure a Windows job object".into(),
+            ));
+        }
+        if unsafe { AssignProcessToJobObject(job, child.as_raw_handle().cast()) } == 0 {
+            unsafe { CloseHandle(job) };
+            return Err(BridgeError::Process(
+                "could not attach Node host to a Windows job object".into(),
+            ));
+        }
+        Ok(Self { job: job as usize })
+    }
+
+    fn terminate(&self, child: &mut Child) {
+        if unsafe { TerminateJobObject(self.job as *mut _, 1) } == 0 {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.job as *mut _) };
+    }
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct JobObjectBasicLimitInformation {
+    per_process_user_time_limit: i64,
+    per_job_user_time_limit: i64,
+    limit_flags: u32,
+    minimum_working_set_size: usize,
+    maximum_working_set_size: usize,
+    active_process_limit: u32,
+    affinity: usize,
+    priority_class: u32,
+    scheduling_class: u32,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct IoCounters {
+    read_operation_count: u64,
+    write_operation_count: u64,
+    other_operation_count: u64,
+    read_transfer_count: u64,
+    write_transfer_count: u64,
+    other_transfer_count: u64,
+}
+
+#[cfg(windows)]
+#[repr(C)]
+struct JobObjectExtendedLimitInformation {
+    basic: JobObjectBasicLimitInformation,
+    io: IoCounters,
+    process_memory_limit: usize,
+    job_memory_limit: usize,
+    peak_process_memory_used: usize,
+    peak_job_memory_used: usize,
+}
+
+#[cfg(windows)]
+const JOB_OBJECT_EXTENDED_LIMIT_INFORMATION: u32 = 9;
+#[cfg(windows)]
+const JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: u32 = 0x0000_2000;
+
+#[cfg(windows)]
+extern "system" {
+    fn CreateJobObjectW(
+        attributes: *const std::ffi::c_void,
+        name: *const u16,
+    ) -> *mut std::ffi::c_void;
+    fn SetInformationJobObject(
+        job: *mut std::ffi::c_void,
+        class: u32,
+        information: *const std::ffi::c_void,
+        length: u32,
+    ) -> i32;
+    fn AssignProcessToJobObject(job: *mut std::ffi::c_void, process: *mut std::ffi::c_void) -> i32;
+    fn TerminateJobObject(job: *mut std::ffi::c_void, exit_code: u32) -> i32;
+    fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+}
 
 struct ActiveProcess {
     generation: u64,
     child: Child,
+    tree: ProcessTree,
     client: BridgeClient,
 }
 
@@ -620,7 +817,7 @@ impl SupervisorInner {
             return;
         };
         process.client.close();
-        terminate_child(&mut process.child);
+        terminate_process(&mut process);
         run_cleanups(cleanups);
     }
 }
@@ -668,12 +865,15 @@ impl NodeSupervisor {
                 value.checked_add(1)
             })
             .map_err(|_| BridgeError::Process("connection generations exhausted".into()))?;
-        let mut command = Command::new(&self.command.program);
+        let program = resolve_program(&self.command.program)?;
+        let mut command = Command::new(program);
         if let Some(cwd) = &self.command.cwd {
             command.current_dir(cwd);
         }
+        configure_process_tree(&mut command);
         command
             .args(&self.command.args)
+            .env_clear()
             .envs(self.command.env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -681,22 +881,30 @@ impl NodeSupervisor {
         let mut child = command
             .spawn()
             .map_err(|error| BridgeError::Process(error.to_string()))?;
-        let stdin = child.stdin.take().ok_or_else(|| {
+        let tree = ProcessTree::attach(&child).inspect_err(|_| {
             terminate_child(&mut child);
+        })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            tree.terminate(&mut child);
             BridgeError::Process("Node host stdin was not piped".into())
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            terminate_child(&mut child);
+            tree.terminate(&mut child);
             BridgeError::Process("Node host stdout was not piped".into())
         })?;
         let client = match BridgeClient::from_io(stdout, stdin, generation, self.config.clone()) {
             Ok(client) => client,
             Err(error) => {
-                terminate_child(&mut child);
+                tree.terminate(&mut child);
                 return Err(error);
             }
         };
-        let mut child = Some(child);
+        let mut process = Some(ActiveProcess {
+            generation,
+            child,
+            tree,
+            client: client.clone(),
+        });
         let weak_inner: Weak<SupervisorInner> = Arc::downgrade(&self.inner);
         client.set_disconnect_handler(move |_| {
             if let Some(inner) = weak_inner.upgrade() {
@@ -708,17 +916,13 @@ impl NodeSupervisor {
             if state.active.is_some() {
                 true
             } else {
-                state.active = Some(ActiveProcess {
-                    generation,
-                    child: child.take().expect("child belongs to one active profile"),
-                    client: client.clone(),
-                });
+                state.active = process.take();
                 false
             }
         };
         if concurrent_start {
             client.close();
-            terminate_child(child.as_mut().expect("concurrent start keeps its child"));
+            terminate_process(&mut process.expect("concurrent start keeps its child"));
             return Err(BridgeError::Process(
                 "a Node host became active while starting this profile".into(),
             ));
@@ -797,15 +1001,13 @@ impl NodeSupervisor {
             Ok(exited) => exited,
             Err(error) => {
                 process.client.close();
-                terminate_child(&mut process.child);
+                terminate_process(&mut process);
                 run_cleanups(cleanups);
                 return Err(error);
             }
         };
-        if !exited {
-            terminate_child(&mut process.child);
-        }
         process.client.close();
+        terminate_process(&mut process);
         run_cleanups(cleanups);
         if exited {
             Ok(())
@@ -831,7 +1033,7 @@ impl Drop for NodeSupervisor {
         };
         if let Some((mut process, cleanups)) = active {
             process.client.close();
-            terminate_child(&mut process.child);
+            terminate_process(&mut process);
             run_cleanups(cleanups);
         }
     }
@@ -871,18 +1073,54 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> BridgeResult<bool> {
     }
 }
 
+fn terminate_process(process: &mut ActiveProcess) {
+    process.tree.terminate(&mut process.child);
+}
+
 fn terminate_child(child: &mut Child) {
-    if child.try_wait().ok().flatten().is_none() {
-        let _ = child.kill();
+    #[cfg(unix)]
+    if let Ok(process_group) = i32::try_from(child.id()) {
+        terminate_process_group(process_group);
     }
+    let _ = child.kill();
     let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn terminate_process_group(process_group: i32) {
+    extern "C" {
+        fn kill(process: i32, signal: i32) -> i32;
+    }
+    unsafe {
+        let _ = kill(-process_group, 9);
+    }
 }
 
 fn run_cleanups(cleanups: Vec<Cleanup>) {
     for cleanup in cleanups {
-        cleanup();
+        let _ = catch_unwind(AssertUnwindSafe(cleanup));
     }
 }
+
+fn resolve_program(program: &Path) -> BridgeResult<PathBuf> {
+    if program.components().count() != 1 {
+        return Ok(program.to_owned());
+    }
+    let path = std::env::var_os("PATH")
+        .ok_or_else(|| BridgeError::Process("PATH is required to resolve the Node host".into()))?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| BridgeError::Process(format!("could not resolve Node host {program:?}")))
+}
+
+#[cfg(unix)]
+fn configure_process_tree(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_process_tree(_: &mut Command) {}
 
 /// Loader adapter for plugins executed by one checked and handshaken Node host.
 #[derive(Clone, Debug)]

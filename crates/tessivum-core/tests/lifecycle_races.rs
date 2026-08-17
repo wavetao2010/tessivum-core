@@ -1,6 +1,7 @@
 use std::{
     future::Future,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use tessivum_core::{BoxDisposer, CoreError, Fiber, FiberState, Scope};
@@ -172,4 +173,155 @@ async fn concurrent_completion_and_disposal_never_resurrect_or_leak_a_fiber() {
             "no resource escapes the completion/disposal race on run {run}"
         );
     }
+}
+
+#[tokio::test]
+async fn aborting_first_dispose_keeps_cleanup_available_to_joiners() {
+    let scope = Scope::root();
+    let cleanup_calls = Arc::new(Mutex::new(0usize));
+    let (cleanup_started, cleanup_started_rx) = oneshot::channel();
+    let (release_cleanup, release_cleanup_rx) = oneshot::channel();
+
+    let cleanup_calls_for_effect = Arc::clone(&cleanup_calls);
+    scope
+        .add_effect(
+            "blocking",
+            disposer(move || async move {
+                *cleanup_calls_for_effect
+                    .lock()
+                    .expect("cleanup counter lock is available") += 1;
+                cleanup_started
+                    .send(())
+                    .expect("test observes cleanup entry");
+                release_cleanup_rx.await.expect("test releases cleanup");
+                Ok(())
+            }),
+        )
+        .expect("effect registration succeeds");
+
+    let first_scope = scope.clone();
+    let first_dispose = tokio::spawn(async move { first_scope.dispose().await });
+    cleanup_started_rx
+        .await
+        .expect("first dispose reached its cleanup gate");
+    assert_eq!(scope.state(), FiberState::Unloading);
+
+    let (joiner_called, joiner_called_rx) = oneshot::channel();
+    let joining_scope = scope.clone();
+    let joiner = tokio::spawn(async move {
+        joiner_called.send(()).expect("test observes joiner entry");
+        joining_scope.dispose().await
+    });
+    joiner_called_rx.await.expect("joiner starts disposing");
+    tokio::task::yield_now().await;
+    assert!(
+        !joiner.is_finished(),
+        "joiner waits for the retained cleanup"
+    );
+
+    first_dispose.abort();
+    assert!(
+        first_dispose
+            .await
+            .expect_err("aborted first dispose returns a join error")
+            .is_cancelled(),
+        "aborting the first dispose drops its caller future"
+    );
+    tokio::task::yield_now().await;
+    assert!(
+        !joiner.is_finished(),
+        "joiner takes over but still awaits the cleanup gate"
+    );
+
+    release_cleanup.send(()).expect("cleanup remains retained");
+    for _ in 0..10 {
+        if joiner.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(joiner.is_finished(), "released cleanup wakes the joiner");
+    joiner
+        .await
+        .expect("joiner task did not panic")
+        .expect("joiner completes the retained cleanup");
+    assert_eq!(scope.state(), FiberState::Disposed);
+    assert_eq!(
+        *cleanup_calls
+            .lock()
+            .expect("cleanup counter lock is available"),
+        1,
+        "retained cleanup runs once"
+    );
+    assert!(
+        scope.effects().is_empty(),
+        "completed cleanup releases effects"
+    );
+}
+
+#[tokio::test]
+async fn aborting_sole_dispose_caller_keeps_cleanup_running() {
+    let scope = Scope::root();
+    let cleanup_calls = Arc::new(Mutex::new(0usize));
+    let (cleanup_started, cleanup_started_rx) = oneshot::channel();
+    let (release_cleanup, release_cleanup_rx) = oneshot::channel();
+    let (cleanup_finished, cleanup_finished_rx) = oneshot::channel();
+
+    let cleanup_calls_for_effect = Arc::clone(&cleanup_calls);
+    scope
+        .add_effect(
+            "blocking",
+            disposer(move || async move {
+                *cleanup_calls_for_effect
+                    .lock()
+                    .expect("cleanup counter lock is available") += 1;
+                cleanup_started
+                    .send(())
+                    .expect("test observes cleanup entry");
+                release_cleanup_rx.await.expect("test releases cleanup");
+                cleanup_finished
+                    .send(())
+                    .expect("test observes cleanup completion");
+                Ok(())
+            }),
+        )
+        .expect("effect registration succeeds");
+
+    let first_scope = scope.clone();
+    let first_dispose = tokio::spawn(async move { first_scope.dispose().await });
+    cleanup_started_rx
+        .await
+        .expect("sole dispose reached its cleanup gate");
+    first_dispose.abort();
+    assert!(
+        first_dispose
+            .await
+            .expect_err("aborted sole dispose returns a join error")
+            .is_cancelled(),
+        "aborting the sole dispose drops only its caller future"
+    );
+
+    release_cleanup
+        .send(())
+        .expect("detached cleanup retains its receiver");
+    tokio::time::timeout(Duration::from_secs(1), cleanup_finished_rx)
+        .await
+        .expect("detached cleanup completes after release")
+        .expect("cleanup driver sends completion");
+    assert_eq!(scope.state(), FiberState::Disposed);
+    assert_eq!(
+        *cleanup_calls
+            .lock()
+            .expect("cleanup counter lock is available"),
+        1,
+        "cleanup runs once after its sole caller is aborted"
+    );
+    assert!(
+        scope.effects().is_empty(),
+        "completed cleanup releases effects"
+    );
+    scope
+        .dispose()
+        .await
+        .expect("later disposal returns the published cleanup result");
 }

@@ -9,10 +9,10 @@ use std::{
 
 use serde_json::{json, Map, Value};
 use tessivum_core::{
-    parse_entry_tree, ContextHandle, CoreError, Entry, EntryGroup, EntryId, EntryOptions,
-    EntryTree, EventBus, EventOptions, Fiber, FiberState, Fixture, Loader, LoaderError,
-    LoaderFuture, LoaderRuntime, PackageResolver, Patch, ResolvedPackage, RuntimeHandle,
-    RuntimeKind, Scope, ServiceKey, TraceEvent, TraceEventKind,
+    parse_entry_tree, ContextHandle, CoreError, Dependency, Entry, EntryGroup, EntryId,
+    EntryOptions, EntryTree, EventBus, EventOptions, Fiber, FiberState, Fixture, ListenerHandle,
+    Loader, LoaderError, LoaderFuture, LoaderRuntime, PackageResolver, Patch, RealmLabel,
+    ResolvedPackage, RuntimeHandle, RuntimeKind, Scope, ServiceKey, TraceEvent, TraceEventKind,
 };
 
 #[derive(Clone, Default)]
@@ -112,8 +112,26 @@ fn event_labels(fixture: &Fixture) -> Vec<String> {
         .map(|labels| labels.into_iter().map(str::to_owned).collect())
         .unwrap_or_else(|| vec!["first".into(), "second".into()])
 }
+fn case_ids(fixture: &Fixture) -> Result<Vec<&str>, String> {
+    let cases = fixture_input(fixture)
+        .and_then(|input| input.get("cases"))
+        .and_then(Value::as_array)
+        .ok_or("conformance catalog requires a cases array")?;
+    if cases.is_empty() {
+        return Err("conformance catalog requires at least one case".into());
+    }
+    cases
+        .iter()
+        .map(|case| {
+            case.get("id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| "conformance catalog case requires a non-empty id".to_owned())
+        })
+        .collect()
+}
 
-async fn lifecycle(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
+async fn lifecycle_trace(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
     let trace = Trace::default();
     let root = Scope::root();
     let fiber = Fiber::new(&root, "effect-dispose").map_err(|error| error.to_string())?;
@@ -195,6 +213,265 @@ async fn lifecycle(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
     }
     state(&trace, fiber.name(), "UNLOADING", "DISPOSED");
     Ok(trace.finish())
+}
+async fn lifecycle_case(id: &str) -> Result<(), String> {
+    match id {
+        "sync-start" => {
+            let root = Scope::root();
+            let fiber = Fiber::new(&root, id).map_err(|error| error.to_string())?;
+            fiber
+                .start(|_| async { Ok(()) })
+                .await
+                .map_err(|error| error.to_string())?;
+            if fiber.state() != FiberState::Active {
+                return Err("synchronous start did not activate the fiber".into());
+            }
+            fiber.dispose().await.map_err(|error| error.to_string())?;
+        }
+        "async-start" => {
+            let root = Scope::root();
+            let fiber = Fiber::new(&root, id).map_err(|error| error.to_string())?;
+            fiber
+                .start(|_| async {
+                    std::future::ready(()).await;
+                    Ok(())
+                })
+                .await
+                .map_err(|error| error.to_string())?;
+            if fiber.state() != FiberState::Active {
+                return Err("asynchronous start did not activate the fiber".into());
+            }
+            fiber.dispose().await.map_err(|error| error.to_string())?;
+        }
+        "sync-cleanup" | "async-cleanup" => {
+            let scope = Scope::root();
+            let calls = Arc::new(Mutex::new(0usize));
+            let cleanup_calls = Arc::clone(&calls);
+            let await_cleanup = id == "async-cleanup";
+            scope
+                .add_effect(
+                    id,
+                    Box::new(move || {
+                        let calls = Arc::clone(&cleanup_calls);
+                        Box::pin(async move {
+                            if await_cleanup {
+                                std::future::ready(()).await;
+                            }
+                            *calls.lock().unwrap_or_else(|poison| poison.into_inner()) += 1;
+                            Ok(())
+                        })
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            scope.dispose().await.map_err(|error| error.to_string())?;
+            if *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != 1 {
+                return Err(format!("{id} did not run exactly once"));
+            }
+        }
+        "iterable-cleanup" | "reverse-disposal" => {
+            let scope = Scope::root();
+            let order = Arc::new(Mutex::new(Vec::new()));
+            for label in ["first", "second"] {
+                let order = Arc::clone(&order);
+                scope
+                    .add_effect(
+                        label,
+                        Box::new(move || {
+                            Box::pin(async move {
+                                order
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner())
+                                    .push(label);
+                                Ok(())
+                            })
+                        }),
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            scope.dispose().await.map_err(|error| error.to_string())?;
+            if *order.lock().unwrap_or_else(|poison| poison.into_inner()) != ["second", "first"] {
+                return Err(format!("{id} did not dispose effects in reverse order"));
+            }
+        }
+        "nested-effect" => {
+            let parent = Scope::root();
+            let child = parent.child().map_err(|error| error.to_string())?;
+            let calls = Arc::new(Mutex::new(0usize));
+            let child_calls = Arc::clone(&calls);
+            child
+                .add_effect(
+                    id,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            *child_calls
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner()) += 1;
+                            Ok(())
+                        })
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            parent.dispose().await.map_err(|error| error.to_string())?;
+            if child.state() != FiberState::Disposed
+                || *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != 1
+            {
+                return Err("nested effect did not quiesce with its parent".into());
+            }
+        }
+        "repeated-disposal" => {
+            let scope = Scope::root();
+            let calls = Arc::new(Mutex::new(0usize));
+            let cleanup_calls = Arc::clone(&calls);
+            scope
+                .add_effect(
+                    id,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            *cleanup_calls
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner()) += 1;
+                            Ok(())
+                        })
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            scope.dispose().await.map_err(|error| error.to_string())?;
+            scope.dispose().await.map_err(|error| error.to_string())?;
+            if *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != 1 {
+                return Err("repeated disposal ran cleanup more than once".into());
+            }
+        }
+        "reentrant-disposal" => {
+            let scope = Scope::root();
+            let reentrant_scope = scope.clone();
+            let calls = Arc::new(Mutex::new(0usize));
+            let cleanup_calls = Arc::clone(&calls);
+            scope
+                .add_effect(
+                    id,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            *cleanup_calls
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner()) += 1;
+                            reentrant_scope.dispose().await?;
+                            Ok(())
+                        })
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            scope.dispose().await.map_err(|error| error.to_string())?;
+            if scope.state() != FiberState::Disposed
+                || *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != 1
+            {
+                return Err("reentrant disposal did not converge on one cleanup".into());
+            }
+        }
+        "failed-start-rollback" => {
+            let parent = Scope::root();
+            let fiber = Fiber::new(&parent, id).map_err(|error| error.to_string())?;
+            let calls = Arc::new(Mutex::new(0usize));
+            let cleanup_calls = Arc::clone(&calls);
+            if fiber
+                .start(move |scope| async move {
+                    scope.add_effect(
+                        "rollback",
+                        Box::new(move || {
+                            Box::pin(async move {
+                                *cleanup_calls
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner()) += 1;
+                                Ok(())
+                            })
+                        }),
+                    )?;
+                    Err(setup_error("requested failed start"))
+                })
+                .await
+                .is_ok()
+            {
+                return Err("failed start unexpectedly succeeded".into());
+            }
+            if fiber.state() != FiberState::Failed
+                || *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != 1
+            {
+                return Err("failed start did not roll back its effect".into());
+            }
+        }
+        "parent-child-quiescence" => {
+            let parent = Scope::root();
+            let child = parent.child().map_err(|error| error.to_string())?;
+            let order = Arc::new(Mutex::new(Vec::new()));
+            let child_order = Arc::clone(&order);
+            child
+                .add_effect(
+                    "child",
+                    Box::new(move || {
+                        Box::pin(async move {
+                            child_order
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .push("child");
+                            Ok(())
+                        })
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            let parent_order = Arc::clone(&order);
+            parent
+                .add_effect(
+                    "parent",
+                    Box::new(move || {
+                        Box::pin(async move {
+                            parent_order
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .push("parent");
+                            Ok(())
+                        })
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            parent.dispose().await.map_err(|error| error.to_string())?;
+            if child.state() != FiberState::Disposed
+                || *order.lock().unwrap_or_else(|poison| poison.into_inner()) != ["child", "parent"]
+            {
+                return Err("parent disposal did not quiesce its child first".into());
+            }
+        }
+        "unload-registration-rejection" => {
+            let scope = Scope::root();
+            let unloading_scope = scope.clone();
+            scope
+                .add_effect(
+                    id,
+                    Box::new(move || {
+                        Box::pin(async move {
+                            if unloading_scope
+                                .add_effect("late", Box::new(|| Box::pin(async { Ok(()) })))
+                                .is_ok()
+                            {
+                                return Err(setup_error("unloading scope accepted a new effect"));
+                            }
+                            Ok(())
+                        })
+                    }),
+                )
+                .map_err(|error| error.to_string())?;
+            scope.dispose().await.map_err(|error| error.to_string())?;
+        }
+        other => return Err(format!("unsupported lifecycle catalog case {other:?}")),
+    }
+    Ok(())
+}
+
+async fn lifecycle(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
+    for id in case_ids(fixture)? {
+        lifecycle_case(id)
+            .await
+            .map_err(|error| format!("lifecycle catalog case {id}: {error}"))?;
+    }
+    lifecycle_trace(fixture).await
 }
 
 #[derive(Debug)]
@@ -310,7 +587,7 @@ async fn provider(
     Ok(fiber)
 }
 
-async fn services(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
+async fn services_trace(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
     let trace = Trace::default();
     let root = ContextHandle::root();
     let root_scope = root.scope();
@@ -371,8 +648,154 @@ async fn services(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
     state(&trace, root_provider.name(), "UNLOADING", "DISPOSED");
     Ok(trace.finish())
 }
+async fn services_case(id: &str) -> Result<(), String> {
+    match id {
+        "late-provider" => {
+            let context = ContextHandle::root();
+            let service = ServiceKey::new("clock", "conformance/v1");
+            let subscription = context
+                .subscribe(vec![Dependency::Required(service.clone())], |_| {})
+                .map_err(|error| error.to_string())?;
+            if subscription.ready() {
+                return Err("missing required provider did not gate its consumer".into());
+            }
+            context
+                .provide(service, CatalogService("wall".into()))
+                .map_err(|error| error.to_string())?;
+            if !subscription.ready() {
+                return Err("late provider did not activate its consumer".into());
+            }
+        }
+        "provider-replacement" | "duplicate-provider" | "stale-generation" => {
+            let context = ContextHandle::root();
+            let service = ServiceKey::new("theme", "conformance/v1");
+            let first = context
+                .provide(service.clone(), CatalogService("light".into()))
+                .map_err(|error| error.to_string())?;
+            let replacement = context
+                .provide(service.clone(), CatalogService("dark".into()))
+                .map_err(|error| error.to_string())?;
+            if first.with(|_| ()).is_ok() || !replacement.is_current() {
+                return Err(format!("{id} did not replace the provider generation"));
+            }
+            let label = context
+                .get::<CatalogService>(&service)
+                .map_err(|error| error.to_string())?
+                .ok_or("replacement service is missing")?
+                .with(|service| service.0.clone())
+                .map_err(|error| error.to_string())?;
+            if label != "dark" {
+                return Err(format!("{id} did not expose the replacement"));
+            }
+        }
+        "provider-removal-recovery" => {
+            let root = ContextHandle::root();
+            let owner = root.child().map_err(|error| error.to_string())?;
+            let service = ServiceKey::new("cache", "conformance/v1");
+            let removed = owner
+                .provide(service.clone(), CatalogService("old".into()))
+                .map_err(|error| error.to_string())?;
+            owner
+                .scope()
+                .dispose()
+                .await
+                .map_err(|error| error.to_string())?;
+            if root
+                .get::<CatalogService>(&service)
+                .map_err(|error| error.to_string())?
+                .is_some()
+                || removed.with(|_| ()).is_ok()
+            {
+                return Err("provider removal left a live service handle".into());
+            }
+            let replacement = root
+                .provide(service.clone(), CatalogService("new".into()))
+                .map_err(|error| error.to_string())?;
+            if replacement
+                .with(|service| service.0.clone())
+                .map_err(|error| error.to_string())?
+                != "new"
+            {
+                return Err("provider recovery did not create a live generation".into());
+            }
+        }
+        "optional-dependency" => {
+            let context = ContextHandle::root();
+            let service = ServiceKey::new("metrics", "conformance/v1");
+            let subscription = context
+                .subscribe(vec![Dependency::Optional(service)], |_| {})
+                .map_err(|error| error.to_string())?;
+            if !subscription.ready() {
+                return Err("missing optional provider gated its consumer".into());
+            }
+        }
+        "isolate-realms" => {
+            let root = ContextHandle::root();
+            let service = ServiceKey::new("storage", "conformance/v1");
+            let alpha = root.isolate(service.clone(), None);
+            let beta = root.isolate(service.clone(), None);
+            alpha
+                .provide(service.clone(), CatalogService("alpha".into()))
+                .map_err(|error| error.to_string())?;
+            if beta
+                .get::<CatalogService>(&service)
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                return Err("isolated realms leaked a provider".into());
+            }
+        }
+        "shared-realm" => {
+            let root = ContextHandle::root();
+            let service = ServiceKey::new("bus", "conformance/v1");
+            let alpha = root.isolate(service.clone(), Some(RealmLabel::new("shared")));
+            let beta = root.isolate(service.clone(), Some(RealmLabel::new("shared")));
+            alpha
+                .provide(service.clone(), CatalogService("shared".into()))
+                .map_err(|error| error.to_string())?;
+            if beta
+                .get::<CatalogService>(&service)
+                .map_err(|error| error.to_string())?
+                .ok_or("shared realm provider is missing")?
+                .with(|value| value.0.clone())
+                .map_err(|error| error.to_string())?
+                != "shared"
+            {
+                return Err("shared realm did not coactivate its provider".into());
+            }
+        }
+        "intercept-merge" => {
+            let context = ContextHandle::root();
+            let service = ServiceKey::new("config", "conformance/v1");
+            let merged = context
+                .intercept(
+                    service.clone(),
+                    json!({"retry": {"attempts": 1}, "source": "parent"}),
+                )
+                .intercept(
+                    service.clone(),
+                    json!({"retry": {"backoff": "fast"}, "source": "child"}),
+                )
+                .intercept_config(&service);
+            if merged != json!({"retry": {"backoff": "fast"}, "source": "child"}) {
+                return Err("intercept chain did not merge child precedence".into());
+            }
+        }
+        other => return Err(format!("unsupported service catalog case {other:?}")),
+    }
+    Ok(())
+}
 
-async fn events(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
+async fn services(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
+    for id in case_ids(fixture)? {
+        services_case(id)
+            .await
+            .map_err(|error| format!("service catalog case {id}: {error}"))?;
+    }
+    services_trace(fixture).await
+}
+
+async fn events_trace(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
     let trace = Trace::default();
     let scope = Scope::root();
     let bus = EventBus::new();
@@ -430,6 +853,352 @@ async fn events(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
         );
     }
     Ok(trace.finish())
+}
+async fn events_case(id: &str) -> Result<(), String> {
+    match id {
+        "emit-ordering" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            for label in ["first", "second"] {
+                let calls = Arc::clone(&calls);
+                bus.on_dynamic(&scope, id, EventOptions::default(), move |_| {
+                    calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(label);
+                    Ok(Value::Null)
+                })
+                .map_err(|error| error.to_string())?;
+            }
+            bus.emit_dynamic(id, &Value::Null)
+                .map_err(|error| error.to_string())?;
+            if *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != ["first", "second"] {
+                return Err("emit did not preserve listener order".into());
+            }
+        }
+        "parallel-aggregate" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            let calls = Arc::new(Mutex::new(0usize));
+            for failure in [true, false, true] {
+                let calls = Arc::clone(&calls);
+                bus.on_dynamic_async(&scope, id, EventOptions::default(), move |_| {
+                    let calls = Arc::clone(&calls);
+                    Box::pin(async move {
+                        *calls.lock().unwrap_or_else(|poison| poison.into_inner()) += 1;
+                        if failure {
+                            Err(setup_error("parallel listener failed"))
+                        } else {
+                            Ok(json!("settled"))
+                        }
+                    })
+                })
+                .map_err(|error| error.to_string())?;
+            }
+            let error = bus
+                .parallel_dynamic(id, Value::Null)
+                .await
+                .expect_err("parallel case must fail");
+            if error
+                .cleanup_errors()
+                .is_none_or(|errors| errors.len() != 2)
+                || *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != 3
+            {
+                return Err("parallel dispatch did not aggregate every failure".into());
+            }
+        }
+        "serial-bail" | "sync-bail" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            for (label, value) in [
+                ("null", Value::Null),
+                ("false", json!(false)),
+                ("stop", json!("stop")),
+                ("late", json!("late")),
+            ] {
+                let calls = Arc::clone(&calls);
+                if id == "serial-bail" {
+                    bus.on_dynamic_async(&scope, id, EventOptions::default(), move |_| {
+                        let calls = Arc::clone(&calls);
+                        let value = value.clone();
+                        Box::pin(async move {
+                            calls
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .push(label);
+                            Ok(value)
+                        })
+                    })
+                    .map_err(|error| error.to_string())?;
+                } else {
+                    bus.on_dynamic(&scope, id, EventOptions::default(), move |_| {
+                        calls
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .push(label);
+                        Ok(value.clone())
+                    })
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+            let result = if id == "serial-bail" {
+                bus.serial_dynamic(id, Value::Null)
+                    .await
+                    .map_err(|error| error.to_string())?
+            } else {
+                bus.bail_dynamic(id, &Value::Null)
+                    .map_err(|error| error.to_string())?
+            };
+            if result != Some(json!("stop"))
+                || *calls.lock().unwrap_or_else(|poison| poison.into_inner())
+                    != ["null", "false", "stop"]
+            {
+                return Err(format!("{id} did not stop on its first effective value"));
+            }
+        }
+        "waterfall-next" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            bus.on_dynamic_waterfall(&scope, id, EventOptions::default(), |value, next| {
+                Box::pin(async move { next.next(json!({"next": value})).await })
+            })
+            .map_err(|error| error.to_string())?;
+            bus.on_dynamic_waterfall(&scope, id, EventOptions::default(), |value, _| {
+                Box::pin(async move { Ok(value) })
+            })
+            .map_err(|error| error.to_string())?;
+            if bus
+                .waterfall_dynamic(id, json!("start"))
+                .await
+                .map_err(|error| error.to_string())?
+                != json!({"next": "start"})
+            {
+                return Err("waterfall next did not transform its value".into());
+            }
+        }
+        "waterfall-short-circuit" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            let downstream = Arc::new(Mutex::new(0usize));
+            bus.on_dynamic_waterfall(&scope, id, EventOptions::default(), |value, _| {
+                Box::pin(async move { Ok(json!({"veto": value})) })
+            })
+            .map_err(|error| error.to_string())?;
+            let downstream_calls = Arc::clone(&downstream);
+            bus.on_dynamic_waterfall(&scope, id, EventOptions::default(), move |value, _| {
+                let downstream = Arc::clone(&downstream_calls);
+                Box::pin(async move {
+                    *downstream
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) += 1;
+                    Ok(value)
+                })
+            })
+            .map_err(|error| error.to_string())?;
+            if bus
+                .waterfall_dynamic(id, json!("blocked"))
+                .await
+                .map_err(|error| error.to_string())?
+                != json!({"veto": "blocked"})
+                || *downstream
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    != 0
+            {
+                return Err("waterfall short-circuit invoked a downstream listener".into());
+            }
+        }
+        "waterfall-wrap" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            bus.on_dynamic_waterfall(&scope, id, EventOptions::default(), |value, next| {
+                Box::pin(async move {
+                    let downstream = next.next(json!({"inner": value})).await?;
+                    Ok(json!({"outer": downstream}))
+                })
+            })
+            .map_err(|error| error.to_string())?;
+            bus.on_dynamic_waterfall(&scope, id, EventOptions::default(), |value, _| {
+                Box::pin(async move { Ok(json!({"terminal": value})) })
+            })
+            .map_err(|error| error.to_string())?;
+            if bus
+                .waterfall_dynamic(id, json!("start"))
+                .await
+                .map_err(|error| error.to_string())?
+                != json!({"outer": {"terminal": {"inner": "start"}}})
+            {
+                return Err("waterfall wrapper did not preserve its downstream result".into());
+            }
+        }
+        "prepend" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            for (label, options) in [
+                ("first", EventOptions::default()),
+                ("second", EventOptions::default()),
+                (
+                    "prepend",
+                    EventOptions {
+                        prepend: true,
+                        ..EventOptions::default()
+                    },
+                ),
+            ] {
+                let calls = Arc::clone(&calls);
+                bus.on_dynamic(&scope, id, options, move |_| {
+                    calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push(label);
+                    Ok(Value::Null)
+                })
+                .map_err(|error| error.to_string())?;
+            }
+            bus.emit_dynamic(id, &Value::Null)
+                .map_err(|error| error.to_string())?;
+            if *calls.lock().unwrap_or_else(|poison| poison.into_inner())
+                != ["prepend", "first", "second"]
+            {
+                return Err(
+                    "prepend did not move its listener ahead of ordinary registrations".into(),
+                );
+            }
+        }
+        "scoped-filter" => {
+            let bus = EventBus::new();
+            let alpha_scope = Scope::root();
+            let beta_scope = Scope::root();
+            let alpha = bus.in_context(&alpha_scope);
+            let beta = bus.in_context(&beta_scope);
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let alpha_calls = Arc::clone(&calls);
+            alpha
+                .on_dynamic(&alpha_scope, id, EventOptions::default(), move |_| {
+                    alpha_calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push("alpha");
+                    Ok(Value::Null)
+                })
+                .map_err(|error| error.to_string())?;
+            let beta_calls = Arc::clone(&calls);
+            beta.on_dynamic(&beta_scope, id, EventOptions::default(), move |_| {
+                beta_calls
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push("beta");
+                Ok(Value::Null)
+            })
+            .map_err(|error| error.to_string())?;
+            alpha
+                .emit_dynamic(id, &Value::Null)
+                .map_err(|error| error.to_string())?;
+            if *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != ["alpha"] {
+                return Err("scoped event filter dispatched another context's listener".into());
+            }
+        }
+        "listener-self-removal" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            let handle = Arc::new(Mutex::new(None::<ListenerHandle>));
+            let listener_handle = Arc::clone(&handle);
+            let calls = Arc::new(Mutex::new(0usize));
+            let listener_calls = Arc::clone(&calls);
+            let registered = bus
+                .on_dynamic(&scope, id, EventOptions::default(), move |_| {
+                    if !listener_handle
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .as_ref()
+                        .is_some_and(ListenerHandle::remove)
+                    {
+                        return Err(setup_error("listener could not remove itself"));
+                    }
+                    *listener_calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner()) += 1;
+                    Ok(Value::Null)
+                })
+                .map_err(|error| error.to_string())?;
+            *handle.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(registered);
+            bus.emit_dynamic(id, &Value::Null)
+                .map_err(|error| error.to_string())?;
+            bus.emit_dynamic(id, &Value::Null)
+                .map_err(|error| error.to_string())?;
+            if *calls.lock().unwrap_or_else(|poison| poison.into_inner()) != 1 {
+                return Err("self-removing listener remained dispatchable".into());
+            }
+        }
+        "owner-disposal-during-dispatch" => {
+            let bus = EventBus::new();
+            let owner = Scope::root();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let disposing_owner = owner.clone();
+            let disposer_calls = Arc::clone(&calls);
+            bus.on_dynamic_async(&owner, id, EventOptions::default(), move |_| {
+                let owner = disposing_owner.clone();
+                let calls = Arc::clone(&disposer_calls);
+                Box::pin(async move {
+                    owner.dispose().await?;
+                    calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push("dispose");
+                    Ok(Value::Null)
+                })
+            })
+            .map_err(|error| error.to_string())?;
+            let downstream_calls = Arc::clone(&calls);
+            bus.on_dynamic_async(&owner, id, EventOptions::default(), move |_| {
+                let calls = Arc::clone(&downstream_calls);
+                Box::pin(async move {
+                    calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push("downstream");
+                    Ok(Value::Null)
+                })
+            })
+            .map_err(|error| error.to_string())?;
+            bus.serial_dynamic(id, Value::Null)
+                .await
+                .map_err(|error| error.to_string())?;
+            if *calls.lock().unwrap_or_else(|poison| poison.into_inner())
+                != ["dispose", "downstream"]
+            {
+                return Err("owner disposal mutated the current dispatch snapshot".into());
+            }
+            calls
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .clear();
+            bus.serial_dynamic(id, Value::Null)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !calls
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .is_empty()
+            {
+                return Err("owner disposal left listeners dispatchable".into());
+            }
+        }
+        other => return Err(format!("unsupported event catalog case {other:?}")),
+    }
+    Ok(())
+}
+
+async fn events(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
+    for id in case_ids(fixture)? {
+        events_case(id)
+            .await
+            .map_err(|error| format!("event catalog case {id}: {error}"))?;
+    }
+    events_trace(fixture).await
 }
 
 #[derive(Default)]
@@ -613,21 +1382,6 @@ fn expect_loader_failure<T>(
         Err(error) => Ok(error),
         Ok(_) => Err(format!("loader catalog case {case} unexpectedly succeeded")),
     }
-}
-
-fn loader_cases(fixture: &Fixture) -> Result<Vec<&str>, String> {
-    fixture_input(fixture)
-        .and_then(|input| input.get("cases"))
-        .and_then(Value::as_array)
-        .ok_or("loader catalog requires a cases array")?
-        .iter()
-        .map(|case| {
-            case.get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| "loader catalog case requires a non-empty id".to_owned())
-        })
-        .collect()
 }
 
 async fn loader_case(id: &str, trace: &Trace) -> Result<(), String> {
@@ -833,8 +1587,10 @@ async fn loader_case(id: &str, trace: &Trace) -> Result<(), String> {
 
 async fn loader(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
     let trace = Trace::default();
-    for case in loader_cases(fixture)? {
-        loader_case(case, &trace).await?;
+    for id in case_ids(fixture)? {
+        loader_case(id, &trace)
+            .await
+            .map_err(|error| format!("loader catalog case {id}: {error}"))?;
     }
     Ok(trace.finish())
 }
@@ -944,7 +1700,12 @@ fn unsupported(fixture: &Fixture) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn mismatch(fixture: &Fixture, expected: &[TraceEvent], actual: &[TraceEvent]) -> ExitCode {
+fn mismatch(
+    fixture: &Fixture,
+    expected: &[TraceEvent],
+    actual: &[TraceEvent],
+    executed_cases: &[String],
+) -> ExitCode {
     let index = expected
         .iter()
         .zip(actual)
@@ -970,19 +1731,21 @@ fn mismatch(fixture: &Fixture, expected: &[TraceEvent], actual: &[TraceEvent]) -
             ("fixture".into(), Value::String(fixture.name.clone())),
             ("status".into(), Value::String("MISMATCH".into())),
             ("trace".into(), trace_values(actual)),
+            ("executedCases".into(), json!(executed_cases)),
             ("error".into(), Value::Object(error)),
         ]))
     );
     ExitCode::from(1)
 }
 
-fn passed(fixture: &Fixture, trace: &[TraceEvent]) -> ExitCode {
+fn passed(fixture: &Fixture, trace: &[TraceEvent], executed_cases: &[String]) -> ExitCode {
     println!(
         "{}",
         json!({
             "fixture": fixture.name,
             "status": "PASS",
             "trace": trace_values(trace),
+            "executedCases": executed_cases,
         })
     );
     ExitCode::SUCCESS
@@ -1024,10 +1787,16 @@ fn main() -> ExitCode {
         Ok(Execution::Trace(trace)) => {
             let expected = normalize_trace(fixture.expected_trace.clone());
             let actual = normalize_trace(trace);
-            if expected.is_empty() || expected == actual {
-                passed(&fixture, &actual)
+            let executed_cases = match case_ids(&fixture) {
+                Ok(cases) => cases.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+                Err(error) => return fail("EXECUTION_ERROR", &fixture.name, error),
+            };
+            let loader_execution_baseline =
+                matches!(&fixture.domain, tessivum_core::Domain::Loader) && expected.is_empty();
+            if loader_execution_baseline || expected == actual {
+                passed(&fixture, &actual, &executed_cases)
             } else {
-                mismatch(&fixture, &expected, &actual)
+                mismatch(&fixture, &expected, &actual, &executed_cases)
             }
         }
     }
