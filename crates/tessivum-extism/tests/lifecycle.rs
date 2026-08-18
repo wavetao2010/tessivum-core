@@ -827,6 +827,23 @@ impl WasmLifecycleHook for IdentityHook {
     }
 }
 
+struct FailingIdentityHook {
+    observed: Arc<Mutex<Option<String>>>,
+}
+
+impl WasmLifecycleHook for FailingIdentityHook {
+    fn install(
+        &self,
+        _manifest: &PluginManifest,
+        _entry: &Entry,
+        instance_id: &str,
+    ) -> WasmResult<Box<dyn WasmLifecycleGuard>> {
+        *self.observed.lock().expect("hook observation is available") =
+            Some(instance_id.to_owned());
+        Err(PluginError::new("HOOK_FAILED", "hook failed", "install"))
+    }
+}
+
 struct IdentityEngine {
     observed: Arc<Mutex<Vec<String>>>,
 }
@@ -1007,6 +1024,50 @@ fn hook_install_failure_does_not_enter_engine() {
     ))
     .is_err());
     assert_eq!(recorded_events(&events), vec!["install"]);
+}
+
+#[test]
+fn hook_install_failure_releases_the_reserved_instance_identity() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::new(Mutex::new(None));
+    let runtime = runtime(
+        &events,
+        false,
+        false,
+        Some(Arc::new(FailingIdentityHook {
+            observed: Arc::clone(&observed),
+        })),
+    );
+    runtime
+        .register(
+            "lifecycle.wasm",
+            WasmPackage::in_memory(manifest()).expect("test package validates"),
+        )
+        .expect("test package registers");
+    assert!(block_on(runtime.instantiate(
+        resolved_package(),
+        runtime_entry(),
+        ContextHandle::root(),
+    ))
+    .is_err());
+    let instance_id = observed
+        .lock()
+        .expect("hook observation is available")
+        .clone()
+        .expect("failing hook records the instance identity");
+    let engine = InMemoryGuestEngine::new(|_export, request, _host| {
+        Ok(ResponseEnvelope::success(&request, Value::Null))
+    });
+    let instance = WasmPluginInstance::instantiate_with_instance_id(
+        package(),
+        Arc::new(engine),
+        Arc::new(CapabilityRegistry::default()),
+        ResourceLimits::default(),
+        json!({}),
+        instance_id,
+    )
+    .expect("failed hook released its unused instance identity");
+    drop(instance);
 }
 
 #[test]

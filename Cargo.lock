@@ -1931,6 +1931,7 @@ name = "tessivum-extism"
 version = "0.1.0"
 dependencies = [
  "extism",
+ "libc",
  "serde",
  "serde_json",
  "tessivum-core",

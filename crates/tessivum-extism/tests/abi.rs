@@ -501,3 +501,37 @@ fn manifest_entry_rejects_symlink_escapes() {
     fs::remove_file(outside).expect("outside module removes");
     fs::remove_dir_all(package).expect("package directory removes");
 }
+
+#[test]
+fn manifest_loader_rejects_oversized_manifest_and_wasm_before_allocation() {
+    let package = package_directory("bounded-package");
+    let manifest_path = package.join("plugin.json");
+    fs::write(&manifest_path, vec![b' '; 256 * 1024 + 1]).expect("oversized manifest writes");
+    let manifest_error = WasmPackage::from_manifest_file(&manifest_path)
+        .expect_err("oversized manifest must fail before parsing");
+    assert_eq!(manifest_error.code, "PACKAGE_READ_FAILED");
+
+    write_manifest(&manifest_path, &manifest(&[]));
+    let wasm_path = package.join("plugin.wasm");
+    let wasm = fs::File::create(&wasm_path).expect("oversized module creates");
+    wasm.set_len(8 * 1024 * 1024 + 1)
+        .expect("oversized module length sets");
+    let wasm_error = WasmPackage::from_manifest_file(&manifest_path)
+        .expect_err("oversized module must fail before reading");
+    assert_eq!(wasm_error.code, "PACKAGE_READ_FAILED");
+    fs::remove_dir_all(package).expect("package directory removes");
+}
+
+#[cfg(unix)]
+#[test]
+fn manifest_loader_does_not_follow_the_final_manifest_symlink() {
+    let package = package_directory("manifest-symlink");
+    let target = package.join("target.json");
+    write_manifest(&target, &manifest(&[]));
+    let link = package.join("plugin.json");
+    std::os::unix::fs::symlink(&target, &link).expect("manifest symlink creates");
+    let error = WasmPackage::from_manifest_file(&link)
+        .expect_err("manifest final symlink must not be followed");
+    assert_eq!(error.code, "PACKAGE_READ_FAILED");
+    fs::remove_dir_all(package).expect("package directory removes");
+}

@@ -6,7 +6,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs,
+    fs::{self, OpenOptions},
+    io::Read,
     path::{Component, Path},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -28,6 +29,7 @@ use tessivum_core::{
 pub const ABI_VERSION: &str = "cordis.plugin/v1";
 const EXTISM_USER_MODULE: &str = "extism:host/user";
 const MAX_WASM_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: usize = 256 * 1024;
 static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
 static INSTANCE_IDS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
@@ -614,13 +616,7 @@ impl WasmPackage {
     /// Loads a JSON manifest and its relative WebAssembly entry point.
     pub fn from_manifest_file(path: impl AsRef<Path>) -> WasmResult<Self> {
         let path = path.as_ref();
-        let data = fs::read(path).map_err(|error| {
-            PluginError::new(
-                "PACKAGE_READ_FAILED",
-                format!("cannot read {}: {error}", path.display()),
-                "instantiate",
-            )
-        })?;
+        let data = read_bounded_package_file(path, MAX_MANIFEST_BYTES, "manifest")?;
         let manifest = serde_json::from_slice::<PluginManifest>(&data).map_err(|error| {
             PluginError::new(
                 "MANIFEST_INVALID",
@@ -652,15 +648,58 @@ impl WasmPackage {
                 "entry resolves outside its package directory",
             ));
         }
-        let wasm = fs::read(&entry).map_err(|error| {
+        let wasm = read_bounded_package_file(&entry, MAX_WASM_BYTES, "WASM entry")?;
+        Self::from_bytes(manifest, wasm)
+    }
+}
+
+fn read_bounded_package_file(path: &Path, limit: usize, label: &str) -> WasmResult<Vec<u8>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|error| {
+        PluginError::new(
+            "PACKAGE_READ_FAILED",
+            format!("cannot open {}: {error}", path.display()),
+            "instantiate",
+        )
+    })?;
+    let metadata = file.metadata().map_err(|error| {
+        PluginError::new(
+            "PACKAGE_READ_FAILED",
+            format!("cannot inspect {}: {error}", path.display()),
+            "instantiate",
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > limit as u64 {
+        return Err(PluginError::new(
+            "PACKAGE_READ_FAILED",
+            format!("{label} must be a regular file no larger than {limit} bytes"),
+            "instantiate",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize + 1);
+    file.take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
             PluginError::new(
                 "PACKAGE_READ_FAILED",
-                format!("cannot read {}: {error}", entry.display()),
+                format!("cannot read {}: {error}", path.display()),
                 "instantiate",
             )
         })?;
-        Self::from_bytes(manifest, wasm)
+    if bytes.len() > limit {
+        return Err(PluginError::new(
+            "PACKAGE_READ_FAILED",
+            format!("{label} exceeds the {limit}-byte limit"),
+            "instantiate",
+        ));
     }
+    Ok(bytes)
 }
 
 /// Interrupt path separate from the guest instance lock.
@@ -1340,25 +1379,32 @@ impl LoaderRuntime for WasmPluginRuntime {
                 "entryName": entry.options.name,
                 "inject": entry.options.inject,
             });
-            let mut guard = self
+            let mut guard = match self
                 .lifecycle_hook
                 .as_ref()
                 .map(|hook| hook.install(&module.manifest, &entry, &instance_id))
                 .transpose()
-                .map_err(loader_error)?;
+            {
+                Ok(guard) => guard,
+                Err(error) => {
+                    release_instance_id(&instance_id);
+                    return Err(loader_error(error));
+                }
+            };
             let instance = match WasmPluginInstance::instantiate_reserved_instance_id(
                 module,
                 Arc::clone(&self.engine),
                 Arc::clone(&self.registry),
                 self.limits.clone(),
                 entry.options.config,
-                instance_id,
+                instance_id.clone(),
             ) {
                 Ok(instance) => instance,
                 Err(error) => {
                     if let Some(guard) = guard.as_mut() {
                         guard.revoke();
                     }
+                    release_instance_id(&instance_id);
                     return Err(loader_error(error));
                 }
             };
