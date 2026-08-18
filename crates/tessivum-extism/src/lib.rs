@@ -325,6 +325,25 @@ impl ResourceLimits {
     }
 }
 
+/// Product-defined lifecycle policy installed for each validated WASM manifest.
+///
+/// Implementations must undo any partial installation before returning an
+/// error. The runtime owns the returned guard until disposal or rollback.
+pub trait WasmLifecycleHook: Send + Sync {
+    fn install(&self, manifest: &PluginManifest) -> WasmResult<Box<dyn WasmLifecycleGuard>>;
+}
+
+/// The active registration produced by a [`WasmLifecycleHook`].
+///
+/// `drain` may wait only until `timeout`. `revoke` must reject future work
+/// synchronously and must not block; it is also called from runtime `Drop`, as
+/// is the guard's own non-blocking `Drop` implementation.
+pub trait WasmLifecycleGuard: Send {
+    fn drain(&mut self, timeout: Duration) -> WasmResult<()>;
+
+    fn revoke(&mut self);
+}
+
 /// A registered host capability receives its capability-specific JSON payload.
 #[derive(Clone, Debug)]
 pub struct CapabilityRequest {
@@ -1020,13 +1039,19 @@ impl WasmPluginInstance {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
         RequestEnvelope::new(format!("{}:{sequence}", self.manifest.id), context, payload)
     }
+
+    fn revoke(&self) {
+        if self.accepting.swap(false, Ordering::AcqRel) {
+            self.cancel_current();
+            self.host.alive.store(false, Ordering::Release);
+            self.guest_available.notify_all();
+        }
+    }
 }
 
 impl Drop for WasmPluginInstance {
     fn drop(&mut self) {
-        self.accepting.store(false, Ordering::Release);
-        self.cancel_current();
-        self.host.alive.store(false, Ordering::Release);
+        self.revoke();
     }
 }
 
@@ -1122,6 +1147,7 @@ pub struct WasmPluginRuntime {
     engine: Arc<dyn GuestEngine>,
     registry: Arc<CapabilityRegistry>,
     limits: ResourceLimits,
+    lifecycle_hook: Option<Arc<dyn WasmLifecycleHook>>,
     packages: Mutex<BTreeMap<String, WasmPackage>>,
 }
 
@@ -1139,8 +1165,15 @@ impl WasmPluginRuntime {
             engine,
             registry,
             limits,
+            lifecycle_hook: None,
             packages: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// Installs a product-defined lifecycle hook for every runtime instance.
+    pub fn with_lifecycle_hook(mut self, hook: Arc<dyn WasmLifecycleHook>) -> Self {
+        self.lifecycle_hook = Some(hook);
+        self
     }
 
     pub fn register(&self, specifier: impl Into<String>, package: WasmPackage) -> WasmResult<()> {
@@ -1184,23 +1217,47 @@ impl LoaderRuntime for WasmPluginRuntime {
                 .map(Ok)
                 .unwrap_or_else(|| WasmPackage::from_manifest_file(&package.location))
                 .map_err(loader_error)?;
+            module.manifest.validate().map_err(loader_error)?;
+            if let Some(wasm) = module.wasm.as_deref() {
+                validate_wasm_exports(wasm).map_err(loader_error)?;
+            }
+            self.limits.validate().map_err(loader_error)?;
+            module
+                .manifest
+                .validate_config(&entry.options.config)
+                .map_err(loader_error)?;
             let context = json!({
                 "entryId": entry.options.id.to_string(),
                 "entryName": entry.options.name,
                 "inject": entry.options.inject,
             });
-            let instance = WasmPluginInstance::instantiate(
+            let mut guard = self
+                .lifecycle_hook
+                .as_ref()
+                .map(|hook| hook.install(&module.manifest))
+                .transpose()
+                .map_err(loader_error)?;
+            let instance = match WasmPluginInstance::instantiate(
                 module,
                 Arc::clone(&self.engine),
                 Arc::clone(&self.registry),
                 self.limits.clone(),
                 entry.options.config,
-            )
-            .map_err(loader_error)?;
+            ) {
+                Ok(instance) => instance,
+                Err(error) => {
+                    if let Some(guard) = guard.as_mut() {
+                        guard.revoke();
+                    }
+                    return Err(loader_error(error));
+                }
+            };
             Ok(Box::new(WasmRuntimeHandle {
                 instance,
                 context,
                 activated: false,
+                guard,
+                limits: self.limits.clone(),
             }) as Box<dyn RuntimeHandle>)
         })
     }
@@ -1210,11 +1267,33 @@ struct WasmRuntimeHandle {
     instance: WasmPluginInstance,
     context: Value,
     activated: bool,
+    guard: Option<Box<dyn WasmLifecycleGuard>>,
+    limits: ResourceLimits,
+}
+
+impl WasmRuntimeHandle {
+    fn drain_and_revoke_guard(&mut self) -> WasmResult<()> {
+        let Some(mut guard) = self.guard.take() else {
+            return Ok(());
+        };
+        let result = guard.drain(self.limits.timeout);
+        guard.revoke();
+        result
+    }
+
+    fn revoke_guard(&mut self) {
+        if let Some(guard) = self.guard.as_mut() {
+            guard.revoke();
+        }
+    }
 }
 
 impl RuntimeHandle for WasmRuntimeHandle {
     fn activate<'a>(&'a mut self) -> LoaderFuture<'a, ()> {
         Box::pin(async move {
+            if self.instance.is_stopped() {
+                return Err(loader_error(stopped_error(GuestExport::Init.phase())));
+            }
             if !self.activated {
                 self.instance
                     .init(self.context.clone())
@@ -1226,7 +1305,18 @@ impl RuntimeHandle for WasmRuntimeHandle {
     }
 
     fn dispose<'a>(&'a mut self) -> LoaderFuture<'a, ()> {
-        Box::pin(async move { self.instance.stop().map_err(loader_error) })
+        Box::pin(async move {
+            let stopped = self.instance.stop();
+            let drained = self.drain_and_revoke_guard();
+            stopped.and(drained).map_err(loader_error)
+        })
+    }
+}
+
+impl Drop for WasmRuntimeHandle {
+    fn drop(&mut self) {
+        self.instance.revoke();
+        self.revoke_guard();
     }
 }
 

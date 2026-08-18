@@ -1,9 +1,11 @@
 use std::{
+    future::Future,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
     },
     thread,
+    task::{Context, Poll, Waker},
     time::Duration,
 };
 
@@ -11,8 +13,10 @@ use serde_json::{json, Value};
 use tessivum_extism::{
     Capability, CapabilityRegistry, GuestCancellation, GuestEngine, GuestExport, GuestInstance,
     HostBindings, InMemoryGuestEngine, PluginError, PluginManifest, RequestEnvelope,
-    ResourceLimits, ResponseEnvelope, WasmPackage, WasmPluginInstance, WasmResult,
+    ResourceLimits, ResponseEnvelope, WasmLifecycleGuard, WasmLifecycleHook, WasmPackage,
+    WasmPluginInstance, WasmPluginRuntime, WasmResult,
 };
+use tessivum_core::{ContextHandle, Entry, LoaderRuntime, ResolvedPackage, RuntimeHandle};
 
 fn manifest() -> PluginManifest {
     serde_json::from_value(json!({
@@ -638,4 +642,298 @@ fn update_event_and_stop_follow_the_guest_lifecycle_and_invalidate_host_handles(
             .is_err(),
         "host bindings become unusable after their instance stops"
     );
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker: &Waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = Box::pin(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => thread::yield_now(),
+        }
+    }
+}
+
+fn runtime_entry() -> Entry {
+    serde_json::from_value(json!({
+        "package": "lifecycle.wasm",
+        "id": "lifecycle-entry",
+        "runtime": "wasm",
+        "config": { "enabled": true }
+    }))
+    .expect("test entry parses")
+}
+
+fn resolved_package() -> ResolvedPackage {
+    ResolvedPackage {
+        specifier: "lifecycle.wasm".into(),
+        location: String::new(),
+    }
+}
+
+fn event(events: &Arc<Mutex<Vec<&'static str>>>, name: &'static str) {
+    events.lock().expect("event log is available").push(name);
+}
+
+fn recorded_events(events: &Arc<Mutex<Vec<&'static str>>>) -> Vec<&'static str> {
+    events.lock().expect("event log is available").clone()
+}
+
+struct HookEngine {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    fail_instantiate: bool,
+    fail_init: bool,
+}
+
+impl GuestEngine for HookEngine {
+    fn instantiate(
+        &self,
+        _package: &WasmPackage,
+        _host: HostBindings,
+        _limits: ResourceLimits,
+    ) -> WasmResult<Box<dyn GuestInstance>> {
+        event(&self.events, "engine");
+        if self.fail_instantiate {
+            return Err(PluginError::new(
+                "ENGINE_FAILED",
+                "engine failed to instantiate",
+                "instantiate",
+            ));
+        }
+        Ok(Box::new(HookGuest {
+            events: Arc::clone(&self.events),
+            fail_init: self.fail_init,
+        }))
+    }
+}
+
+struct HookGuest {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    fail_init: bool,
+}
+
+impl GuestInstance for HookGuest {
+    fn call(
+        &mut self,
+        export: GuestExport,
+        input: &[u8],
+        _max_output_bytes: usize,
+    ) -> WasmResult<Vec<u8>> {
+        let name = match export {
+            GuestExport::Init => "init",
+            GuestExport::Stop => "stop",
+            _ => "call",
+        };
+        event(&self.events, name);
+        if export == GuestExport::Init && self.fail_init {
+            return Err(PluginError::new("INIT_FAILED", "init failed", "init"));
+        }
+        response(input, json!({ "ok": true }))
+    }
+
+    fn cancellation(&self) -> Arc<dyn GuestCancellation> {
+        Arc::new(TestCancellation::default())
+    }
+}
+
+struct RecordingGuard {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    revoked: bool,
+    drain_error: bool,
+}
+
+impl RecordingGuard {
+    fn revoke_once(&mut self) {
+        if !self.revoked {
+            self.revoked = true;
+            event(&self.events, "revoke");
+        }
+    }
+}
+
+impl WasmLifecycleGuard for RecordingGuard {
+    fn drain(&mut self, _timeout: Duration) -> WasmResult<()> {
+        event(&self.events, "drain");
+        if self.drain_error {
+            return Err(PluginError::new("DRAIN_FAILED", "drain failed", "dispose"));
+        }
+        Ok(())
+    }
+
+    fn revoke(&mut self) {
+        self.revoke_once();
+    }
+}
+
+impl Drop for RecordingGuard {
+    fn drop(&mut self) {
+        self.revoke_once();
+        event(&self.events, "drop");
+    }
+}
+
+struct RecordingHook {
+    events: Arc<Mutex<Vec<&'static str>>>,
+    fail_install: bool,
+    drain_error: bool,
+}
+
+impl WasmLifecycleHook for RecordingHook {
+    fn install(&self, manifest: &PluginManifest) -> WasmResult<Box<dyn WasmLifecycleGuard>> {
+        assert_eq!(manifest.abi, "cordis.plugin/v1");
+        event(&self.events, "install");
+        if self.fail_install {
+            return Err(PluginError::new("HOOK_FAILED", "hook failed", "install"));
+        }
+        Ok(Box::new(RecordingGuard {
+            events: Arc::clone(&self.events),
+            revoked: false,
+            drain_error: self.drain_error,
+        }))
+    }
+}
+
+fn runtime(
+    events: &Arc<Mutex<Vec<&'static str>>>,
+    fail_instantiate: bool,
+    fail_init: bool,
+    hook: Option<Arc<dyn WasmLifecycleHook>>,
+) -> WasmPluginRuntime {
+    let engine = Arc::new(HookEngine {
+        events: Arc::clone(events),
+        fail_instantiate,
+        fail_init,
+    });
+    let runtime = WasmPluginRuntime::with_engine(
+        engine,
+        Arc::new(CapabilityRegistry::default()),
+        ResourceLimits::default(),
+    );
+    match hook {
+        Some(hook) => runtime.with_lifecycle_hook(hook),
+        None => runtime,
+    }
+}
+
+fn handle(runtime: &WasmPluginRuntime) -> Box<dyn RuntimeHandle> {
+    runtime
+        .register(
+            "lifecycle.wasm",
+            WasmPackage::in_memory(manifest()).expect("test package validates"),
+        )
+        .expect("test package registers");
+    block_on(runtime.instantiate(
+        resolved_package(),
+        runtime_entry(),
+        ContextHandle::root(),
+    ))
+    .expect("test runtime instantiates")
+}
+
+#[test]
+fn lifecycle_hook_installs_before_engine_and_disposes_in_order() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(RecordingHook {
+        events: Arc::clone(&events),
+        fail_install: false,
+        drain_error: false,
+    });
+    let runtime = runtime(&events, false, false, Some(hook));
+    let mut handle = handle(&runtime);
+    assert_eq!(recorded_events(&events), vec!["install", "engine"]);
+
+    block_on(handle.activate()).expect("activation succeeds");
+    block_on(handle.dispose()).expect("disposal succeeds");
+    assert_eq!(
+        recorded_events(&events),
+        vec!["install", "engine", "init", "stop", "drain", "revoke", "drop"]
+    );
+
+    block_on(handle.dispose()).expect("duplicate disposal is idempotent");
+    assert!(block_on(handle.activate()).is_err(), "late activation is rejected");
+    assert_eq!(
+        recorded_events(&events),
+        vec!["install", "engine", "init", "stop", "drain", "revoke", "drop"]
+    );
+}
+
+#[test]
+fn lifecycle_hook_guard_rolls_back_when_engine_instantiation_fails() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(RecordingHook {
+        events: Arc::clone(&events),
+        fail_install: false,
+        drain_error: false,
+    });
+    let runtime = runtime(&events, true, false, Some(hook));
+    runtime
+        .register(
+            "lifecycle.wasm",
+            WasmPackage::in_memory(manifest()).expect("test package validates"),
+        )
+        .expect("test package registers");
+    assert!(block_on(runtime.instantiate(
+        resolved_package(),
+        runtime_entry(),
+        ContextHandle::root(),
+    ))
+    .is_err());
+    assert_eq!(
+        recorded_events(&events),
+        vec!["install", "engine", "revoke", "drop"]
+    );
+}
+
+#[test]
+fn hook_install_failure_does_not_enter_engine() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(RecordingHook {
+        events: Arc::clone(&events),
+        fail_install: true,
+        drain_error: false,
+    });
+    let runtime = runtime(&events, false, false, Some(hook));
+    runtime
+        .register(
+            "lifecycle.wasm",
+            WasmPackage::in_memory(manifest()).expect("test package validates"),
+        )
+        .expect("test package registers");
+    assert!(block_on(runtime.instantiate(
+        resolved_package(),
+        runtime_entry(),
+        ContextHandle::root(),
+    ))
+    .is_err());
+    assert_eq!(recorded_events(&events), vec!["install"]);
+}
+
+#[test]
+fn activation_failure_still_disposes_the_lifecycle_guard() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(RecordingHook {
+        events: Arc::clone(&events),
+        fail_install: false,
+        drain_error: false,
+    });
+    let runtime = runtime(&events, false, true, Some(hook));
+    let mut handle = handle(&runtime);
+    assert!(block_on(handle.activate()).is_err());
+    block_on(handle.dispose()).expect("failed activation still disposes");
+    assert_eq!(
+        recorded_events(&events),
+        vec!["install", "engine", "init", "stop", "drain", "revoke", "drop"]
+    );
+}
+
+#[test]
+fn runtime_without_hook_preserves_existing_lifecycle_behavior() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let runtime = runtime(&events, false, false, None);
+    let mut handle = handle(&runtime);
+    block_on(handle.activate()).expect("activation succeeds");
+    block_on(handle.dispose()).expect("disposal succeeds");
+    assert_eq!(recorded_events(&events), vec!["engine", "init", "stop"]);
 }
