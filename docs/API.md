@@ -224,6 +224,8 @@ the complete manifest and envelope. `tessivum-extism` exports:
   `CapabilityHandler` for host-provided functions; and
 - `WasmPluginRuntime` as the `RuntimeKind::Wasm` Loader adapter.
 
+`WasmPackage::from_manifest_file` reads the manifest and entry through bounded single-open file descriptors: manifests are limited to 256 KiB, modules to 8 MiB, both must be regular files, and Unix final-component symlinks are rejected. `from_bytes` applies the same 8 MiB module admission bound.
+
 A `CapabilityRegistry` is deny-by-default. A guest call reaches a handler only
 when its manifest declares the capability, the registry grants it, and a
 handler is registered. The v1 capability names are `cordis.log`,

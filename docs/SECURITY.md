@@ -59,8 +59,9 @@ capability set and handlers appropriate to the data and side effects exposed.
 - `PluginManifest` uses `deny_unknown_fields`, rejects empty identifiers,
   requires a numeric three-component semver, exact `cordis.plugin/v1`, unique
   permissions/exports, all five lifecycle exports, and the supported config
-  schema subset. The WASM module exports are checked before Extism
-  instantiation.
+  schema subset. Manifest files are bounded to 256 KiB and WASM modules to
+  8 MiB; package files are read once as regular files with Unix final symlinks
+  disabled before parser-only export validation and the single Extism compile.
 - `WasmPluginInstance::instantiate` validates manifest, limits, and concrete
   configuration before creating a guest. The Extism engine configures the
   declared maximum linear-memory pages, timeout, fuel limit, no WASI, and
