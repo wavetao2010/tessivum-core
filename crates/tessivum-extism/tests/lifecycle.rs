@@ -4,19 +4,19 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
     },
-    thread,
     task::{Context, Poll, Waker},
+    thread,
     time::Duration,
 };
 
 use serde_json::{json, Value};
+use tessivum_core::{ContextHandle, Entry, LoaderRuntime, ResolvedPackage, RuntimeHandle};
 use tessivum_extism::{
     Capability, CapabilityRegistry, GuestCancellation, GuestEngine, GuestExport, GuestInstance,
     HostBindings, InMemoryGuestEngine, PluginError, PluginManifest, RequestEnvelope,
     ResourceLimits, ResponseEnvelope, WasmLifecycleGuard, WasmLifecycleHook, WasmPackage,
     WasmPluginInstance, WasmPluginRuntime, WasmResult,
 };
-use tessivum_core::{ContextHandle, Entry, LoaderRuntime, ResolvedPackage, RuntimeHandle};
 
 fn manifest() -> PluginManifest {
     serde_json::from_value(json!({
@@ -824,12 +824,8 @@ fn handle(runtime: &WasmPluginRuntime) -> Box<dyn RuntimeHandle> {
             WasmPackage::in_memory(manifest()).expect("test package validates"),
         )
         .expect("test package registers");
-    block_on(runtime.instantiate(
-        resolved_package(),
-        runtime_entry(),
-        ContextHandle::root(),
-    ))
-    .expect("test runtime instantiates")
+    block_on(runtime.instantiate(resolved_package(), runtime_entry(), ContextHandle::root()))
+        .expect("test runtime instantiates")
 }
 
 #[test]
@@ -852,7 +848,10 @@ fn lifecycle_hook_installs_before_engine_and_disposes_in_order() {
     );
 
     block_on(handle.dispose()).expect("duplicate disposal is idempotent");
-    assert!(block_on(handle.activate()).is_err(), "late activation is rejected");
+    assert!(
+        block_on(handle.activate()).is_err(),
+        "late activation is rejected"
+    );
     assert_eq!(
         recorded_events(&events),
         vec!["install", "engine", "init", "stop", "drain", "revoke", "drop"]
