@@ -781,7 +781,12 @@ struct RecordingHook {
 }
 
 impl WasmLifecycleHook for RecordingHook {
-    fn install(&self, manifest: &PluginManifest) -> WasmResult<Box<dyn WasmLifecycleGuard>> {
+    fn install(
+        &self,
+        manifest: &PluginManifest,
+        _entry: &Entry,
+        _instance_id: &str,
+    ) -> WasmResult<Box<dyn WasmLifecycleGuard>> {
         assert_eq!(manifest.abi, "cordis.plugin/v1");
         event(&self.events, "install");
         if self.fail_install {
@@ -792,6 +797,52 @@ impl WasmLifecycleHook for RecordingHook {
             revoked: false,
             drain_error: self.drain_error,
         }))
+    }
+}
+
+struct IdentityGuard;
+
+impl WasmLifecycleGuard for IdentityGuard {
+    fn drain(&mut self, _timeout: Duration) -> WasmResult<()> {
+        Ok(())
+    }
+
+    fn revoke(&mut self) {}
+}
+
+struct IdentityHook {
+    observed: Arc<Mutex<Option<(String, String)>>>,
+}
+
+impl WasmLifecycleHook for IdentityHook {
+    fn install(
+        &self,
+        _manifest: &PluginManifest,
+        entry: &Entry,
+        instance_id: &str,
+    ) -> WasmResult<Box<dyn WasmLifecycleGuard>> {
+        *self.observed.lock().expect("hook observation is available") =
+            Some((entry.options.id.to_string(), instance_id.to_owned()));
+        Ok(Box::new(IdentityGuard))
+    }
+}
+
+struct IdentityEngine {
+    observed: Arc<Mutex<Vec<String>>>,
+}
+
+impl GuestEngine for IdentityEngine {
+    fn instantiate(
+        &self,
+        _package: &WasmPackage,
+        host: HostBindings,
+        _limits: ResourceLimits,
+    ) -> WasmResult<Box<dyn GuestInstance>> {
+        self.observed
+            .lock()
+            .expect("engine observation is available")
+            .push(host.instance_id().to_owned());
+        Ok(Box::new(ImmediateGuest))
     }
 }
 
@@ -856,6 +907,55 @@ fn lifecycle_hook_installs_before_engine_and_disposes_in_order() {
         recorded_events(&events),
         vec!["install", "engine", "init", "stop", "drain", "revoke", "drop"]
     );
+}
+
+#[test]
+fn lifecycle_hook_observes_the_entry_and_host_binding_instance_identity() {
+    let hook_observed = Arc::new(Mutex::new(None));
+    let host_observed = Arc::new(Mutex::new(Vec::new()));
+    let runtime = WasmPluginRuntime::with_engine(
+        Arc::new(IdentityEngine {
+            observed: Arc::clone(&host_observed),
+        }),
+        Arc::new(CapabilityRegistry::default()),
+        ResourceLimits::default(),
+    )
+    .with_lifecycle_hook(Arc::new(IdentityHook {
+        observed: Arc::clone(&hook_observed),
+    }));
+    runtime
+        .register(
+            "lifecycle.wasm",
+            WasmPackage::in_memory(manifest()).expect("test package validates"),
+        )
+        .expect("test package registers");
+    let entry = runtime_entry();
+    let entry_id = entry.options.id.to_string();
+    let mut handle =
+        block_on(runtime.instantiate(resolved_package(), entry, ContextHandle::root()))
+            .expect("runtime instantiates");
+    let (_, instance_id) = hook_observed
+        .lock()
+        .expect("hook observation is available")
+        .clone()
+        .expect("hook receives an observation");
+    assert_eq!(
+        hook_observed
+            .lock()
+            .expect("hook observation is available")
+            .as_ref()
+            .expect("hook receives an observation")
+            .0,
+        entry_id
+    );
+    assert_eq!(
+        host_observed
+            .lock()
+            .expect("engine observation is available")
+            .as_slice(),
+        &[instance_id]
+    );
+    block_on(handle.dispose()).expect("disposal succeeds");
 }
 
 #[test]

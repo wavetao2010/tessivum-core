@@ -27,6 +27,9 @@ use tessivum_core::{
 /// The only ABI accepted by this runtime.
 pub const ABI_VERSION: &str = "cordis.plugin/v1";
 const EXTISM_USER_MODULE: &str = "extism:host/user";
+const MAX_WASM_BYTES: usize = 8 * 1024 * 1024;
+static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
+static INSTANCE_IDS: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// Result used by all WASM-runtime public operations.
 pub type WasmResult<T> = Result<T, PluginError>;
@@ -325,12 +328,15 @@ impl ResourceLimits {
     }
 }
 
-/// Product-defined lifecycle policy installed for each validated WASM manifest.
-///
-/// Implementations must undo any partial installation before returning an
-/// error. The runtime owns the returned guard until disposal or rollback.
+/// The runtime calls `install` after manifest/config validation and before
+/// engine construction, with the exact entry and instance identity it will use.
 pub trait WasmLifecycleHook: Send + Sync {
-    fn install(&self, manifest: &PluginManifest) -> WasmResult<Box<dyn WasmLifecycleGuard>>;
+    fn install(
+        &self,
+        manifest: &PluginManifest,
+        entry: &Entry,
+        instance_id: &str,
+    ) -> WasmResult<Box<dyn WasmLifecycleGuard>>;
 }
 
 /// The active registration produced by a [`WasmLifecycleHook`].
@@ -349,6 +355,7 @@ pub trait WasmLifecycleGuard: Send {
 pub struct CapabilityRequest {
     pub capability: Capability,
     pub plugin_id: String,
+    pub instance_id: String,
     pub payload: Value,
 }
 
@@ -451,6 +458,7 @@ pub struct HostBindings {
     registry: Arc<CapabilityRegistry>,
     permissions: Arc<BTreeSet<Capability>>,
     plugin_id: String,
+    instance_id: String,
     alive: Arc<AtomicBool>,
     max_input_bytes: usize,
     max_output_bytes: usize,
@@ -460,6 +468,7 @@ impl HostBindings {
     fn new(
         registry: Arc<CapabilityRegistry>,
         manifest: &PluginManifest,
+        instance_id: String,
         alive: Arc<AtomicBool>,
         max_input_bytes: usize,
         max_output_bytes: usize,
@@ -468,6 +477,7 @@ impl HostBindings {
             registry,
             permissions: Arc::new(manifest.permissions()),
             plugin_id: manifest.id.clone(),
+            instance_id,
             alive,
             max_input_bytes,
             max_output_bytes,
@@ -488,6 +498,7 @@ impl HostBindings {
             CapabilityRequest {
                 capability,
                 plugin_id: self.plugin_id.clone(),
+                instance_id: self.instance_id.clone(),
                 payload,
             },
         )?;
@@ -500,6 +511,11 @@ impl HostBindings {
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Acquire)
+    }
+
+    /// Returns this host binding's opaque process-unique instance identifier.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     fn functions(&self) -> Vec<Function> {
@@ -704,11 +720,12 @@ impl GuestEngine for ExtismGuestEngine {
             .with_wasi(false)
             .with_fuel_limit(limits.fuel)
             .build()
-            .map_err(|error| extism_error(error.to_string(), "instantiate"))?;
+            .map_err(|error| extism_error(error, "instantiate"))?;
         let cancellation = Arc::new(ExtismCancellation(plugin.cancel_handle()));
         Ok(Box::new(ExtismGuestInstance {
             plugin,
             cancellation,
+            fuel_limit: limits.fuel,
         }))
     }
 }
@@ -716,6 +733,7 @@ impl GuestEngine for ExtismGuestEngine {
 struct ExtismGuestInstance {
     plugin: Plugin,
     cancellation: Arc<ExtismCancellation>,
+    fuel_limit: u64,
 }
 
 impl GuestInstance for ExtismGuestInstance {
@@ -725,10 +743,19 @@ impl GuestInstance for ExtismGuestInstance {
         input: &[u8],
         max_output_bytes: usize,
     ) -> WasmResult<Vec<u8>> {
-        let output: &[u8] = self
-            .plugin
-            .call(export.as_str(), input)
-            .map_err(|error| extism_error(error.to_string(), export.phase()))?;
+        let output: &[u8] = match self.plugin.call(export.as_str(), input) {
+            Ok(output) => output,
+            Err(error) => {
+                if self.plugin.fuel_consumed() == Some(self.fuel_limit) {
+                    return Err(PluginError::new(
+                        "FUEL_LIMIT_EXCEEDED",
+                        "guest exhausted its configured fuel",
+                        export.phase(),
+                    ));
+                }
+                return Err(extism_error(error, export.phase()));
+            }
+        };
         if output.len() > max_output_bytes {
             return Err(output_limit_error(max_output_bytes, output.len()));
         }
@@ -746,7 +773,7 @@ impl GuestCancellation for ExtismCancellation {
     fn cancel(&self) -> WasmResult<()> {
         self.0
             .cancel()
-            .map_err(|error| extism_error(error.to_string(), "cancel"))
+            .map_err(|error| extism_error(error, "cancel"))
     }
 }
 
@@ -867,6 +894,7 @@ impl GuestCancellation for InMemoryCancellation {
 /// A running, serialized WASM plugin instance.
 pub struct WasmPluginInstance {
     manifest: PluginManifest,
+    instance_id: String,
     state: Mutex<PluginState>,
     guest_available: Condvar,
     active: Mutex<Option<Arc<CallCancellation>>>,
@@ -890,6 +918,47 @@ impl WasmPluginInstance {
         limits: ResourceLimits,
         config: Value,
     ) -> WasmResult<Self> {
+        let instance_id = allocate_instance_id(&package.manifest.id);
+        Self::instantiate_reserved_instance_id(
+            package,
+            engine,
+            registry,
+            limits,
+            config,
+            instance_id.clone(),
+        )
+        .inspect_err(|_| release_instance_id(&instance_id))
+    }
+
+    /// Instantiates a guest with an identity preinstalled by the host policy.
+    pub fn instantiate_with_instance_id(
+        package: WasmPackage,
+        engine: Arc<dyn GuestEngine>,
+        registry: Arc<CapabilityRegistry>,
+        limits: ResourceLimits,
+        config: Value,
+        instance_id: impl Into<String>,
+    ) -> WasmResult<Self> {
+        let instance_id = reserve_instance_id(instance_id.into(), &package.manifest.id)?;
+        Self::instantiate_reserved_instance_id(
+            package,
+            engine,
+            registry,
+            limits,
+            config,
+            instance_id.clone(),
+        )
+        .inspect_err(|_| release_instance_id(&instance_id))
+    }
+
+    fn instantiate_reserved_instance_id(
+        package: WasmPackage,
+        engine: Arc<dyn GuestEngine>,
+        registry: Arc<CapabilityRegistry>,
+        limits: ResourceLimits,
+        config: Value,
+        instance_id: String,
+    ) -> WasmResult<Self> {
         package.manifest.validate()?;
         if let Some(wasm) = package.wasm.as_deref() {
             validate_wasm_exports(wasm)?;
@@ -900,6 +969,7 @@ impl WasmPluginInstance {
         let host = HostBindings::new(
             registry,
             &package.manifest,
+            instance_id.clone(),
             Arc::clone(&alive),
             limits.max_input_bytes,
             limits.max_output_bytes,
@@ -907,6 +977,7 @@ impl WasmPluginInstance {
         let guest = engine.instantiate(&package, host.clone(), limits.clone())?;
         Ok(Self {
             manifest: package.manifest,
+            instance_id,
             state: Mutex::new(PluginState {
                 guest: Some(guest),
                 config,
@@ -923,6 +994,11 @@ impl WasmPluginInstance {
 
     pub fn manifest(&self) -> &PluginManifest {
         &self.manifest
+    }
+
+    /// Returns this instance's opaque process-unique identifier.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 
     pub fn config(&self) -> Value {
@@ -1037,7 +1113,7 @@ impl WasmPluginInstance {
 
     fn request(&self, context: Value, payload: Value) -> RequestEnvelope {
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
-        RequestEnvelope::new(format!("{}:{sequence}", self.manifest.id), context, payload)
+        RequestEnvelope::new(format!("{}:{sequence}", self.instance_id), context, payload)
     }
 
     fn revoke(&self) {
@@ -1052,6 +1128,7 @@ impl WasmPluginInstance {
 impl Drop for WasmPluginInstance {
     fn drop(&mut self) {
         self.revoke();
+        release_instance_id(&self.instance_id);
     }
 }
 
@@ -1116,10 +1193,33 @@ fn call_guest(
     if output.len() > limits.max_output_bytes {
         return Err(output_limit_error(limits.max_output_bytes, output.len()));
     }
-    let response = serde_json::from_slice::<ResponseEnvelope>(&output).map_err(|error| {
+    let document = serde_json::from_slice::<Value>(&output).map_err(|_| {
         PluginError::new(
             "PROTOCOL_INVALID",
-            format!("invalid guest response envelope: {error}"),
+            "guest response is not a valid response envelope",
+            export.phase(),
+        )
+    })?;
+    let object = document.as_object().ok_or_else(|| {
+        PluginError::new(
+            "PROTOCOL_INVALID",
+            "guest response is not a valid response envelope",
+            export.phase(),
+        )
+    })?;
+    let result = object.get("result").cloned();
+    let has_error = object.contains_key("error");
+    if result.is_some() == has_error {
+        return Err(PluginError::new(
+            "PROTOCOL_INVALID",
+            "guest response must contain exactly one result or error",
+            export.phase(),
+        ));
+    }
+    let response = serde_json::from_value::<ResponseEnvelope>(document).map_err(|_| {
+        PluginError::new(
+            "PROTOCOL_INVALID",
+            "guest response is not a valid response envelope",
             export.phase(),
         )
     })?;
@@ -1130,16 +1230,24 @@ fn call_guest(
             export.phase(),
         ));
     }
-    if let Some(error) = response.error {
-        return Err(error);
+    if let Some(result) = result {
+        return Ok(result);
     }
-    response.result.ok_or_else(|| {
+    let error = response.error.ok_or_else(|| {
         PluginError::new(
             "PROTOCOL_INVALID",
-            "guest response must contain result or error",
+            "guest error must not be null",
             export.phase(),
         )
-    })
+    })?;
+    if error.phase != export.phase() {
+        return Err(PluginError::new(
+            "PROTOCOL_INVALID",
+            "guest error phase does not match invoked export",
+            export.phase(),
+        ));
+    }
+    Err(guest_rejected_error(export))
 }
 
 /// Loader adapter for registered packages and real Extism modules.
@@ -1226,6 +1334,7 @@ impl LoaderRuntime for WasmPluginRuntime {
                 .manifest
                 .validate_config(&entry.options.config)
                 .map_err(loader_error)?;
+            let instance_id = allocate_instance_id(&module.manifest.id);
             let context = json!({
                 "entryId": entry.options.id.to_string(),
                 "entryName": entry.options.name,
@@ -1234,15 +1343,16 @@ impl LoaderRuntime for WasmPluginRuntime {
             let mut guard = self
                 .lifecycle_hook
                 .as_ref()
-                .map(|hook| hook.install(&module.manifest))
+                .map(|hook| hook.install(&module.manifest, &entry, &instance_id))
                 .transpose()
                 .map_err(loader_error)?;
-            let instance = match WasmPluginInstance::instantiate(
+            let instance = match WasmPluginInstance::instantiate_reserved_instance_id(
                 module,
                 Arc::clone(&self.engine),
                 Arc::clone(&self.registry),
                 self.limits.clone(),
                 entry.options.config,
+                instance_id,
             ) {
                 Ok(instance) => instance,
                 Err(error) => {
@@ -1377,17 +1487,47 @@ fn stopped_error(phase: &str) -> PluginError {
     PluginError::new("INSTANCE_STOPPED", "plugin instance has stopped", phase)
 }
 
-fn extism_error(message: String, phase: &str) -> PluginError {
-    let code = if message.contains("timeout") {
-        "TIMEOUT"
-    } else if message.contains("out of fuel") {
-        "FUEL_LIMIT_EXCEEDED"
-    } else if message.contains("oom") {
-        "MEMORY_LIMIT_EXCEEDED"
-    } else {
-        "GUEST_TRAP"
-    };
-    PluginError::new(code, message, phase)
+fn extism_error(_error: extism::Error, phase: &str) -> PluginError {
+    PluginError::new("GUEST_TRAP", "guest execution failed", phase)
+}
+
+fn guest_rejected_error(export: GuestExport) -> PluginError {
+    PluginError::new("GUEST_REJECTED", "guest rejected request", export.phase())
+}
+
+fn allocate_instance_id(plugin_id: &str) -> String {
+    loop {
+        let instance_id = format!(
+            "wasm:{}:{}",
+            std::process::id(),
+            NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        if instance_id != plugin_id && lock(&INSTANCE_IDS).insert(instance_id.clone()) {
+            return instance_id;
+        }
+    }
+}
+
+fn reserve_instance_id(instance_id: String, plugin_id: &str) -> WasmResult<String> {
+    if instance_id.trim().is_empty() || instance_id == plugin_id {
+        return Err(PluginError::new(
+            "INSTANCE_ID_INVALID",
+            "instance id must be non-empty and differ from plugin id",
+            "instantiate",
+        ));
+    }
+    if !lock(&INSTANCE_IDS).insert(instance_id.clone()) {
+        return Err(PluginError::new(
+            "INSTANCE_ID_DUPLICATE",
+            "instance id already exists",
+            "instantiate",
+        ));
+    }
+    Ok(instance_id)
+}
+
+fn release_instance_id(instance_id: &str) {
+    lock(&INSTANCE_IDS).remove(instance_id);
 }
 
 fn unique_strings(field: &str, values: &[String]) -> WasmResult<()> {
@@ -1554,9 +1694,9 @@ fn validate_config(schema: &Value, value: &Value, path: &str) -> WasmResult<()> 
 }
 
 fn validate_wasm_exports(wasm: &[u8]) -> WasmResult<()> {
-    PluginBuilder::new(wasm)
-        .compile()
-        .map_err(|error| module_error(format!("module cannot be compiled: {error}")))?;
+    if wasm.len() > MAX_WASM_BYTES {
+        return Err(module_error("module exceeds the 8 MiB size limit"));
+    }
     let exports = wasm_function_exports(wasm)?;
     for export in GuestExport::ALL {
         let signature = exports.get(export.as_str()).ok_or_else(|| {

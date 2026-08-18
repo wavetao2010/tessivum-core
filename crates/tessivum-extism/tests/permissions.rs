@@ -79,6 +79,8 @@ fn every_v1_capability_is_available_only_when_declared_and_granted() {
             .register(capability, move |request: CapabilityRequest| {
                 assert_eq!(request.capability, expected_capability);
                 assert_eq!(request.plugin_id, "permissions.wasm");
+                assert!(!request.instance_id.is_empty());
+                assert_ne!(request.instance_id, request.plugin_id);
                 assert_eq!(request.payload, expected_payload);
                 observed
                     .lock()
@@ -155,4 +157,96 @@ fn capability_denial_distinguishes_missing_permission_from_missing_handler() {
         .expect_err("granted capability without a handler remains unavailable");
     assert_eq!(error.code, "CAPABILITY_UNAVAILABLE");
     assert_eq!(error.phase, "call");
+}
+
+#[test]
+fn candidate_instances_with_one_plugin_id_have_distinct_instance_ids() {
+    let log = capability("cordis.log");
+    let registry = Arc::new(CapabilityRegistry::default());
+    registry.grant(log);
+    let delivered = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&delivered);
+    registry
+        .register(log, move |request: CapabilityRequest| {
+            observed
+                .lock()
+                .expect("handler log is available")
+                .push((request.plugin_id, request.instance_id));
+            Ok(Value::Null)
+        })
+        .expect("capability handler registers");
+
+    let first_log = log;
+    let first = instance(
+        manifest(&["cordis.log"]),
+        InMemoryGuestEngine::new(move |_export, request, host| {
+            let result = host.invoke(first_log, Value::Null)?;
+            Ok(ResponseEnvelope::success(&request, result))
+        }),
+        Arc::clone(&registry),
+    );
+    let second_log = log;
+    let second = instance(
+        manifest(&["cordis.log"]),
+        InMemoryGuestEngine::new(move |_export, request, host| {
+            let result = host.invoke(second_log, Value::Null)?;
+            Ok(ResponseEnvelope::success(&request, result))
+        }),
+        registry,
+    );
+    let first_id = first.instance_id().to_owned();
+    let second_id = second.instance_id().to_owned();
+    assert_ne!(first_id, second_id);
+    assert_ne!(first_id, "permissions.wasm");
+    assert_ne!(second_id, "permissions.wasm");
+
+    first
+        .call(json!({}), Value::Null)
+        .expect("first call succeeds");
+    second
+        .call(json!({}), Value::Null)
+        .expect("second call succeeds");
+    let delivered = delivered.lock().expect("handler log is available");
+    assert_eq!(
+        delivered.as_slice(),
+        &[
+            ("permissions.wasm".to_owned(), first_id),
+            ("permissions.wasm".to_owned(), second_id),
+        ]
+    );
+}
+
+#[test]
+fn explicit_instance_constructor_propagates_the_preinstalled_identity() {
+    let log = capability("cordis.log");
+    let registry = Arc::new(CapabilityRegistry::default());
+    registry.grant(log);
+    let delivered = Arc::new(Mutex::new(None));
+    let observed = Arc::clone(&delivered);
+    registry
+        .register(log, move |request: CapabilityRequest| {
+            *observed.lock().expect("handler slot is available") = Some(request.instance_id);
+            Ok(Value::Null)
+        })
+        .expect("capability handler registers");
+    let instance = WasmPluginInstance::instantiate_with_instance_id(
+        WasmPackage::in_memory(manifest(&["cordis.log"])).expect("test package validates"),
+        Arc::new(InMemoryGuestEngine::new(move |_export, request, host| {
+            let result = host.invoke(log, Value::Null)?;
+            Ok(ResponseEnvelope::success(&request, result))
+        })),
+        registry,
+        ResourceLimits::default(),
+        json!({}),
+        "preinstalled-candidate-42",
+    )
+    .expect("guest instantiates with the preinstalled identity");
+    assert_eq!(instance.instance_id(), "preinstalled-candidate-42");
+    instance
+        .call(json!({}), Value::Null)
+        .expect("guest call succeeds");
+    assert_eq!(
+        *delivered.lock().expect("handler slot is available"),
+        Some("preinstalled-candidate-42".to_owned())
+    );
 }
