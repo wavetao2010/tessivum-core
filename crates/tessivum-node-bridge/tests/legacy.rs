@@ -61,10 +61,15 @@ fn host_command() -> HostCommand {
         .parent()
         .and_then(|path| path.parent())
         .expect("bridge crate is nested below the workspace root");
-    HostCommand::new("bun")
+    let command = HostCommand::new("bun")
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
-        .current_dir(root.join("node/compat-host"))
+        .current_dir(root.join("node/compat-host"));
+    if let Some(vendor_root) = std::env::var_os("CORDIS_VENDOR_ROOT") {
+        command.env("CORDIS_VENDOR_ROOT", vendor_root)
+    } else {
+        command
+    }
 }
 
 fn fixture_path(name: &str) -> String {

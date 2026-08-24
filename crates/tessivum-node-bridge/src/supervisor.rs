@@ -27,6 +27,48 @@ use crate::protocol::{BridgeError, BridgeResult, Frame, FrameCodec, FrameKind, R
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
+const MAX_STARTUP_STDERR_BYTES: usize = 4 * 1024;
+
+struct StartupStderr {
+    output: Arc<Mutex<Vec<u8>>>,
+    done: Receiver<()>,
+}
+
+impl StartupStderr {
+    fn capture<R>(mut reader: R) -> Self
+    where
+        R: Read + Send + 'static,
+    {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&output);
+        let (done_tx, done) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let mut buffer = [0; 1024];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 {
+                    break;
+                }
+                let mut output = lock(&captured);
+                let remaining = MAX_STARTUP_STDERR_BYTES.saturating_sub(output.len());
+                output.extend_from_slice(&buffer[..count.min(remaining)]);
+            }
+            let _ = done_tx.send(());
+        });
+        Self { output, done }
+    }
+
+    fn attach(&self, error: BridgeError) -> BridgeError {
+        let _ = self.done.recv_timeout(Duration::from_millis(100));
+        let output = lock(&self.output);
+        let diagnostic = String::from_utf8_lossy(&output).trim().escape_default().to_string();
+        if diagnostic.is_empty() {
+            error
+        } else {
+            BridgeError::Handshake(format!("{error}; host stderr: {diagnostic}"))
+        }
+    }
+}
+
 /// Limits and deadlines for one bounded Node transport.
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
@@ -877,7 +919,7 @@ impl NodeSupervisor {
             .envs(self.command.env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = command
             .spawn()
             .map_err(|error| BridgeError::Process(error.to_string()))?;
@@ -892,6 +934,11 @@ impl NodeSupervisor {
             tree.terminate(&mut child);
             BridgeError::Process("Node host stdout was not piped".into())
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            tree.terminate(&mut child);
+            BridgeError::Process("Node host stderr was not piped".into())
+        })?;
+        let stderr = StartupStderr::capture(stderr);
         let client = match BridgeClient::from_io(stdout, stdin, generation, self.config.clone()) {
             Ok(client) => client,
             Err(error) => {
@@ -929,7 +976,7 @@ impl NodeSupervisor {
         }
         if let Err(error) = client.handshake(self.config.handshake_timeout) {
             self.inner.release_generation(generation);
-            return Err(error);
+            return Err(stderr.attach(error));
         }
         Ok(client)
     }

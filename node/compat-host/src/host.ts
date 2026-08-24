@@ -115,6 +115,7 @@ function vendorRoot() {
     configured,
     resolve(process.cwd(), 'upstream/deepseek-harness/vendor'),
     resolve(process.cwd(), '../upstream/deepseek-harness/vendor'),
+    resolve(process.cwd(), '../../../upstream/deepseek-harness/vendor'),
   ].filter((value): value is string => !!value)
   for (const candidate of candidates) {
     const root = basename(candidate) === 'cordis' ? resolve(candidate, '..') : resolve(candidate)
