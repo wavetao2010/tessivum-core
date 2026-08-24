@@ -2,13 +2,18 @@
 
 **Report schema:** `tessivum.differential-report/v1`  
 **Recorded:** 2026-08-17T10:19:40Z  
-**ABI:** `cordis.plugin/v1` · **bridge:** `cordis.node/v1`
+**ABI:** `cordis.plugin/v1` · **bridge:** `cordis.node/v1`  
+**Repository source release:** `0.1.1` · all runtime crates remain `publish = false`; this is not a crates.io package release.
+
+The evidence below was recorded for the `0.1.0` release on 2026-08-17. This
+`0.1.1` repository source patch does not claim a new conformance or benchmark run.
+
 
 The machine-readable evidence is [`../fixtures/conformance/differential-report.json`](../fixtures/conformance/differential-report.json).
 
-## Current oracle evidence
+## Recorded 0.1.0 oracle evidence
 
-The current TypeScript oracle was invoked from `oracle/` with:
+The recorded TypeScript oracle was invoked from `oracle/` with:
 
 ```sh
 bun run oracle -- ../fixtures/conformance/<fixture>.json

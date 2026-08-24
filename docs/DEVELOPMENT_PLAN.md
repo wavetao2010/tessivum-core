@@ -745,8 +745,12 @@ M8 前必须记录：
 
 ## 13.1 Rust crate
 
-阶段一使用 `0.x` 版本表达公开接口仍在收敛。每个 release/tag：
+阶段一使用 `0.x` 版本表达公开接口仍在收敛。当前仓库源码 release 为 `0.1.1`：四个
+runtime crate 均为 `0.1.1` 且 `publish = false`，因此它是仓库源码 release，不是
+crates.io 包发布。该 release 坐标独立于 `cordis.plugin/v1`、`cordis.node/v1` 和
+`tessivum.conformance/v1` conformance fixture schema。
 
+每个 release/tag：
 - 固定 changelog；
 - 附 conformance 结果；
 - 附 ABI/Bridge 版本；
