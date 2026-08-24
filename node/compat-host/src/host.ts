@@ -115,7 +115,6 @@ function vendorRoot() {
     configured,
     resolve(process.cwd(), 'upstream/deepseek-harness/vendor'),
     resolve(process.cwd(), '../upstream/deepseek-harness/vendor'),
-    '/Users/chan/Documents/my_project/SCHarness/upstream/deepseek-harness/vendor',
   ].filter((value): value is string => !!value)
   for (const candidate of candidates) {
     const root = basename(candidate) === 'cordis' ? resolve(candidate, '..') : resolve(candidate)
@@ -130,6 +129,9 @@ function installVendorResolver(vendor: string) {
     '@deepseek-ai/cordis': join(vendor, 'cordis', 'src', 'index.ts'),
     '@deepseek-ai/cosmokit': join(vendor, 'cosmokit', 'src', 'index.ts'),
     '@deepseek-ai/cordis-plugin-loader': join(vendor, 'loader', 'src', 'index.ts'),
+    cordis: join(vendor, 'cordis', 'src', 'index.ts'),
+    cosmokit: join(vendor, 'cosmokit', 'src', 'index.ts'),
+    '@cordisjs/plugin-loader': join(vendor, 'loader', 'src', 'index.ts'),
   }
   Bun.plugin({
     name: 'tessivum-vendored-cordis',

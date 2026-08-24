@@ -6,6 +6,14 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## Unreleased
+
+### Runtimes
+
+- The Bun compatibility host now resolves ordinary `cordis`, `cosmokit`, and
+  `@cordisjs/plugin-loader` imports to the pinned DeepSeek Cordis vendor, so
+  unchanged community packages share the Host's Cordis module identity.
+
 ## 0.1.0 — 2026-08-17
 
 First release of the Core runtime surface.
