@@ -60,7 +60,10 @@ impl StartupStderr {
     fn attach(&self, error: BridgeError) -> BridgeError {
         let _ = self.done.recv_timeout(Duration::from_millis(100));
         let output = lock(&self.output);
-        let diagnostic = String::from_utf8_lossy(&output).trim().escape_default().to_string();
+        let diagnostic = String::from_utf8_lossy(&output)
+            .trim()
+            .escape_default()
+            .to_string();
         if diagnostic.is_empty() {
             error
         } else {

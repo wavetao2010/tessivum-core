@@ -3,150 +3,152 @@
     "node": "cordis.node/v1",
     "wasm": "cordis.plugin/v1"
   },
+  "recordedAt": "2026-08-24T12:21:09Z",
+  "repositoryVersion": "0.1.1",
   "batchSize": 32,
   "benchmarks": [
     {
-      "median": 88,
+      "median": 96,
       "name": "context_fiber_memory_proxy",
       "note": "shallow ContextHandle + Fiber layout; excludes allocator and Arc targets",
       "operationsPerSample": 1,
-      "p95": 88,
+      "p95": 96,
       "samples": [
-        88,
-        88,
-        88
+        96,
+        96,
+        96
       ],
       "unit": "bytes"
     },
     {
-      "median": 12250,
+      "median": 88333,
       "name": "native_lifecycle",
       "operationsPerSample": 1,
-      "p95": 34625,
+      "p95": 117333,
       "samples": [
-        12250,
-        1459,
-        34625
+        117333,
+        87708,
+        88333
       ],
       "unit": "ns"
     },
     {
-      "median": 16000000,
+      "median": 4986753,
       "name": "service_lookup",
       "operationsPerSample": 32,
-      "p95": 16334864,
+      "p95": 5907328,
       "samples": [
-        3011764,
-        16000000,
-        16334864
+        1462857,
+        4986753,
+        5907328
       ],
       "unit": "operations/s"
     },
     {
-      "median": 8000000,
+      "median": 3047619,
       "name": "event_emit",
       "operationsPerSample": 32,
-      "p95": 8827586,
+      "p95": 3979109,
       "samples": [
-        5818181,
-        8000000,
-        8827586
+        2713704,
+        3047619,
+        3979109
       ],
       "unit": "operations/s"
     },
     {
-      "median": 1849375,
+      "median": 2660625,
       "name": "wasm_cold_call",
       "operationsPerSample": 1,
-      "p95": 42463375,
+      "p95": 7379834,
       "samples": [
-        42463375,
-        1849375,
-        1641458
+        7379834,
+        2583625,
+        2660625
       ],
       "unit": "ns"
     },
     {
-      "median": 6209,
+      "median": 5166,
       "name": "wasm_warm_call",
       "operationsPerSample": 1,
-      "p95": 13083,
+      "p95": 10708,
       "samples": [
-        13083,
-        6209,
-        5417
+        10708,
+        5083,
+        5166
       ],
       "unit": "ns"
     },
     {
-      "median": 35464625,
+      "median": 33523917,
       "name": "node_bridge_cold",
       "operationsPerSample": 1,
-      "p95": 187100333,
+      "p95": 181050583,
       "samples": [
-        187100333,
-        28979250,
-        35464625
+        181050583,
+        33523917,
+        31276125
       ],
       "unit": "ns"
     },
     {
-      "median": 8330,
+      "median": 7075,
       "name": "node_bridge_warm",
       "operationsPerSample": 1,
-      "p95": 13544,
+      "p95": 9195,
       "samples": [
-        867,
-        8330,
-        13544
+        621,
+        7075,
+        9195
       ],
       "unit": "operations/s"
     },
     {
-      "median": 28126,
+      "median": 25939,
       "name": "node_bridge_batch",
       "operationsPerSample": 32,
-      "p95": 49158,
+      "p95": 31079,
       "samples": [
-        28126,
-        20370,
-        49158
+        16659,
+        31079,
+        25939
       ],
       "unit": "operations/s"
     },
     {
-      "median": 152208,
+      "median": 165625,
       "name": "loader_tree",
       "operationsPerSample": 16,
-      "p95": 190083,
+      "p95": 259292,
       "samples": [
-        190083,
-        152208,
-        129416
+        259292,
+        165625,
+        164042
       ],
       "unit": "ns"
     },
     {
-      "median": 363250,
+      "median": 853750,
       "name": "loader_update",
       "operationsPerSample": 16,
-      "p95": 363917,
+      "p95": 864250,
       "samples": [
-        363917,
-        334375,
-        363250
+        853750,
+        864250,
+        841333
       ],
       "unit": "ns"
     },
     {
-      "median": 5792,
+      "median": 446166,
       "name": "root_dispose",
       "operationsPerSample": 32,
-      "p95": 5917,
+      "p95": 452333,
       "samples": [
-        5917,
-        5792,
-        5667
+        446166,
+        452333,
+        443167
       ],
       "unit": "ns"
     }
