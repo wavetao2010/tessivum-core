@@ -44,10 +44,13 @@ impl StartupStderr {
         let (done_tx, done) = mpsc::sync_channel(1);
         thread::spawn(move || {
             let mut buffer = [0; 1024];
-            while let Ok(count) = reader.read(&mut buffer) {
-                if count == 0 {
-                    break;
-                }
+            loop {
+                let count = match reader.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(count) => count,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                };
                 let mut output = lock(&captured);
                 let remaining = MAX_STARTUP_STDERR_BYTES.saturating_sub(output.len());
                 output.extend_from_slice(&buffer[..count.min(remaining)]);
@@ -65,10 +68,54 @@ impl StartupStderr {
             .escape_default()
             .to_string();
         if diagnostic.is_empty() {
-            error
-        } else {
-            BridgeError::Handshake(format!("{error}; host stderr: {diagnostic}"))
+            return error;
         }
+        let diagnostic = |message: String| format!("{message}; host stderr: {diagnostic}");
+        match error {
+            BridgeError::Io(message) => BridgeError::Io(diagnostic(message)),
+            BridgeError::InvalidFrame(message) => BridgeError::InvalidFrame(diagnostic(message)),
+            BridgeError::Handshake(message) => BridgeError::Handshake(diagnostic(message)),
+            BridgeError::Disconnected(message) => BridgeError::Disconnected(diagnostic(message)),
+            BridgeError::Process(message) => BridgeError::Process(diagnostic(message)),
+            error => error,
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_stderr_tests {
+    use super::*;
+
+    struct InterruptedThenData(u8);
+
+    impl Read for InterruptedThenData {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            self.0 += 1;
+            match self.0 {
+                1 => Err(std::io::ErrorKind::Interrupted.into()),
+                2 => {
+                    buffer[..7].copy_from_slice(b"warning");
+                    Ok(7)
+                }
+                _ => Ok(0),
+            }
+        }
+    }
+
+    #[test]
+    fn startup_stderr_retries_interrupts_without_erasing_typed_errors() {
+        let stderr = StartupStderr::capture(InterruptedThenData(0));
+        assert_eq!(
+            stderr.attach(BridgeError::Handshake("invalid ready".into())),
+            BridgeError::Handshake("invalid ready; host stderr: warning".into())
+        );
+
+        let stderr = StartupStderr::capture(std::io::Cursor::new(b"warning"));
+        let version = BridgeError::ProtocolVersion {
+            expected: crate::PROTOCOL_VERSION.into(),
+            received: "cordis.node/v2".into(),
+        };
+        assert_eq!(stderr.attach(version.clone()), version);
     }
 }
 

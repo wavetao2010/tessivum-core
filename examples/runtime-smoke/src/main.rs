@@ -131,10 +131,15 @@ fn wasm_package(root: &Path) -> Result<WasmPackage, Box<dyn Error>> {
 }
 
 fn host_command(root: &Path) -> HostCommand {
-    HostCommand::new("bun")
+    let command = HostCommand::new("bun")
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
-        .current_dir(root.join("node/compat-host"))
+        .current_dir(root.join("node/compat-host"));
+    if let Some(vendor_root) = std::env::var_os("CORDIS_VENDOR_ROOT") {
+        command.env("CORDIS_VENDOR_ROOT", vendor_root)
+    } else {
+        command
+    }
 }
 
 fn entry(id: &str, package: impl Into<String>, runtime: RuntimeKind, config: Value) -> Entry {

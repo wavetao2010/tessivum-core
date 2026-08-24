@@ -618,6 +618,11 @@ fn node_supervisor(options: &Options, root: &Path, batch: usize) -> Result<NodeS
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
         .current_dir(root.join("node/compat-host"));
+    let host = if let Some(vendor_root) = std::env::var_os("CORDIS_VENDOR_ROOT") {
+        host.env("CORDIS_VENDOR_ROOT", vendor_root)
+    } else {
+        host
+    };
     let config = ClientConfig {
         queue_capacity: batch.saturating_add(8).max(64),
         handshake_timeout: Duration::from_secs(5),
