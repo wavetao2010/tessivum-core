@@ -3,13 +3,13 @@
 **Report schema:** `tessivum.differential-report/v1`  
 **Recorded:** 2026-08-17T10:19:40Z  
 **ABI:** `cordis.plugin/v1` · **bridge:** `cordis.node/v1`  
-**Repository source release:** `0.1.1` · all runtime crates remain `publish = false`; this is not a crates.io package release.
+**Repository source release:** `0.1.2` · all runtime crates remain `publish = false`; this is not a crates.io package release.
 
 The differential oracle evidence below was recorded for the `0.1.0` release on
 2026-08-17 and remains the compatible `tessivum.conformance/v1` baseline. The
 `0.1.1` release reran all 111 Rust workspace tests and refreshed
-[`BENCHMARK_RESULTS.json`](BENCHMARK_RESULTS.json) on 2026-08-24; it does not
-claim a new TypeScript oracle recording.
+[`BENCHMARK_RESULTS.json`](BENCHMARK_RESULTS.json) on 2026-08-24. `0.1.2`
+adds the MIT license without changing runtime behavior or claiming a new TypeScript oracle recording.
 
 
 The machine-readable evidence is [`../fixtures/conformance/differential-report.json`](../fixtures/conformance/differential-report.json).

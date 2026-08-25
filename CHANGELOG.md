@@ -6,6 +6,14 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## 0.1.2 — 2026-08-25
+
+### Licensing
+
+- Licensed the repository and all four runtime crates under the MIT License.
+- Runtime behavior, `cordis.plugin/v1`, `cordis.node/v1`, and
+  `tessivum.conformance/v1` are unchanged from `0.1.1`.
+
 ## 0.1.1 — 2026-08-24
 
 ### Runtimes
