@@ -6,6 +6,15 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## 0.1.3 — 2026-08-25
+
+### Legacy Node bridge
+
+- Allowed bounded `log` frames while the host is initializing, before its
+  `ready` frame. Community packages can now emit Cordis startup diagnostics
+  without aborting the bridge handshake.
+- Kept every other pre-ready frame invalid; `cordis.node/v1` is unchanged.
+
 ## 0.1.2 — 2026-08-25
 
 ### Licensing

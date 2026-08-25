@@ -272,7 +272,7 @@ impl ClientInner {
         if disconnected {
             return;
         }
-        if handshaking && frame.kind != FrameKind::Ready {
+        if handshaking && !matches!(frame.kind, FrameKind::Ready | FrameKind::Log) {
             self.disconnect(BridgeError::Handshake(format!(
                 "received {} instead of ready",
                 frame.kind.as_str()

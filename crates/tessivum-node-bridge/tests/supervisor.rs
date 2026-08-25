@@ -127,6 +127,49 @@ fn client_sends_hello_before_requests_and_rejects_wrong_version_or_generation() 
 }
 
 #[test]
+fn client_accepts_a_log_before_ready() {
+    let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
+    let reader = socket.try_clone().expect("client read side clones");
+    let client = BridgeClient::from_io(reader, socket, 9, ClientConfig::default())
+        .expect("client owns the stream pair");
+    let (logged, received_log) = mpsc::channel();
+    client.set_log_handler(move |payload| {
+        logged.send(payload).expect("startup log is observed");
+    });
+    let host = thread::spawn(move || {
+        let codec = FrameCodec::default();
+        assert_eq!(
+            codec
+                .read_frame(&mut peer)
+                .expect("client sends hello")
+                .kind,
+            FrameKind::Hello
+        );
+        codec
+            .write_frame(
+                &mut peer,
+                &Frame::new(9, FrameKind::Log, json!({ "message": "starting" })),
+            )
+            .expect("test host sends startup log");
+        codec
+            .write_frame(&mut peer, &Frame::ready(9))
+            .expect("test host sends ready");
+    });
+
+    client
+        .handshake(Duration::from_secs(1))
+        .expect("a startup log does not abort the handshake");
+    assert_eq!(
+        received_log
+            .recv_timeout(Duration::from_secs(1))
+            .expect("startup log reaches the configured handler"),
+        json!({ "message": "starting" })
+    );
+    client.close();
+    host.join().expect("test host thread settles");
+}
+
+#[test]
 fn client_correlates_a_response_after_a_valid_handshake() {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
     let reader = socket.try_clone().expect("client read side clones");
