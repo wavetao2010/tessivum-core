@@ -6,6 +6,15 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## 0.1.4 — 2026-08-25
+
+### Legacy Node compatibility host
+
+- Load the compiled pinned Cordis and Loader entries. Packaged deployments no
+  longer ask Bun to import the source-only `FiberState` const enum from a
+  compiled Cordis module.
+- `cordis.node/v1`, `cordis.plugin/v1`, and the Rust API surface are unchanged.
+
 ## 0.1.3 — 2026-08-25
 
 ### Legacy Node bridge

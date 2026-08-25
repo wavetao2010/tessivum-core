@@ -119,7 +119,7 @@ function vendorRoot() {
   ].filter((value): value is string => !!value)
   for (const candidate of candidates) {
     const root = basename(candidate) === 'cordis' ? resolve(candidate, '..') : resolve(candidate)
-    if (existsSync(join(root, 'cordis', 'src', 'index.ts')) && existsSync(join(root, 'cosmokit', 'src', 'index.ts'))) return root
+    if (existsSync(join(root, 'cordis', 'lib', 'index.js')) && existsSync(join(root, 'cosmokit', 'lib', 'index.js')) && existsSync(join(root, 'loader', 'lib', 'index.js'))) return root
   }
   throw new BridgeError('CORDIS_NOT_FOUND', 'set CORDIS_VENDOR_ROOT to the checked-out vendor directory or cordis package directory')
 }
@@ -127,12 +127,12 @@ function vendorRoot() {
 function installVendorResolver(vendor: string) {
   if (typeof Bun === 'undefined' || typeof Bun.plugin !== 'function') throw new BridgeError('BUN_REQUIRED', 'compat-host must run under Bun')
   const aliases: Record<string, string> = {
-    '@deepseek-ai/cordis': join(vendor, 'cordis', 'src', 'index.ts'),
-    '@deepseek-ai/cosmokit': join(vendor, 'cosmokit', 'src', 'index.ts'),
-    '@deepseek-ai/cordis-plugin-loader': join(vendor, 'loader', 'src', 'index.ts'),
-    cordis: join(vendor, 'cordis', 'src', 'index.ts'),
-    cosmokit: join(vendor, 'cosmokit', 'src', 'index.ts'),
-    '@cordisjs/plugin-loader': join(vendor, 'loader', 'src', 'index.ts'),
+    '@deepseek-ai/cordis': join(vendor, 'cordis', 'lib', 'index.js'),
+    '@deepseek-ai/cosmokit': join(vendor, 'cosmokit', 'lib', 'index.js'),
+    '@deepseek-ai/cordis-plugin-loader': join(vendor, 'loader', 'lib', 'index.js'),
+    cordis: join(vendor, 'cordis', 'lib', 'index.js'),
+    cosmokit: join(vendor, 'cosmokit', 'lib', 'index.js'),
+    '@cordisjs/plugin-loader': join(vendor, 'loader', 'lib', 'index.js'),
   }
   Bun.plugin({
     name: 'tessivum-vendored-cordis',
@@ -240,8 +240,9 @@ export class CompatHost {
 
   private async initialize() {
     if (this.root) return
-    const cordis = await import(pathToFileURL(join(this.vendor, 'cordis', 'src', 'index.ts')).href) as { Context: new () => Context }
-    const loaderModule = await import(pathToFileURL(join(this.vendor, 'loader', 'src', 'index.ts')).href) as { Loader: new (ctx: Context, config?: RecordValue) => Loader }
+    // The vendor root is selected at runtime, so these module URLs cannot be static imports.
+    const cordis = await import(pathToFileURL(join(this.vendor, 'cordis', 'lib', 'index.js')).href) as { Context: new () => Context }
+    const loaderModule = await import(pathToFileURL(join(this.vendor, 'loader', 'lib', 'index.js')).href) as { Loader: new (ctx: Context, config?: RecordValue) => Loader }
     this.root = new cordis.Context()
     this.root.baseUrl = pathToFileURL(`${process.cwd()}/`).href
     this.root.logger.exporter({
