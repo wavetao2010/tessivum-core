@@ -343,6 +343,7 @@ export class CompatHost {
   private readonly upgradeToken = randomBytes(32).toString('hex')
   private upgradeServer: Bun.Server<UpgradeSocketData> | undefined
   private upgradePort: Promise<number> | undefined
+  private settingsFiber: Fiber | undefined
   private nextToolId = 1n
   private readonly sessions = new Map<string, SessionSnapshot>()
   private activeInvokes = 0
@@ -644,6 +645,39 @@ export class CompatHost {
     this.context().provide('desktopPnpm', { runPlugin: (args: unknown, invokingDir: unknown, signal?: AbortSignal) => this.runPlugin(args, invokingDir, signal) })
   }
 
+  private async ensureSettingsProvider() {
+    if (this.settingsFiber) return this.settingsFiber.await()
+    const root = process.env.TESSIVUM_HOST_MODULE_ROOT
+    if (!root) return
+    const target = join(root, '@deepseek-ai', 'dsh-settings', 'lib', 'index.js')
+    const settingsModule = await import(pathToFileURL(target).href) as any
+    const host = this
+    class NativeSettingsProvider extends settingsModule.SettingsProvider {
+      get writable() {
+        return true
+      }
+
+      async load() {
+        return object(await host.requestRemote('service.call', {
+          service: 'settings@1',
+          method: 'loadDocument',
+          params: {},
+        }), 'settings document')
+      }
+
+      async persist(namespace: string, value: unknown) {
+        await host.requestRemote('service.call', {
+          service: 'settings@1',
+          method: 'persistUnregistered',
+          params: { namespace, value },
+        })
+      }
+    }
+    const fiber = this.context().plugin(NativeSettingsProvider) as Fiber
+    this.settingsFiber = fiber
+    await fiber.await()
+  }
+
   private async invokeRoute(payload: RecordValue, signal: AbortSignal) {
     const route = this.routes.get(text(payload.routeId, 'routeId'))
     if (!route || route.removed || !route.registered) throw new BridgeError('UNKNOWN_ROUTE', 'route is no longer active')
@@ -904,6 +938,8 @@ export class CompatHost {
     const id = text(payload.pluginId ?? payload.id, 'pluginId')
     if (this.plugins.has(id)) throw new BridgeError('DUPLICATE_PLUGIN', `plugin ${id} is already loaded`)
     const target = moduleTarget(payload)
+    await this.ensureSettingsProvider()
+    abortIfNeeded(signal)
     const module = await import(/* @vite-ignore */importTarget(target)) as RecordValue
     abortIfNeeded(signal)
     const chosen = exportName(payload)
