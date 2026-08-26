@@ -540,6 +540,16 @@ export class CompatHost {
     if (frame.kind === 'cancel') return this.cancel(frame)
     if (frame.kind === 'pnpm.output') return this.output(frame)
     if (frame.kind === 'web.route.request') return this.dispatchInvoke(frame)
+    if (frame.kind === 'response' || frame.kind === 'error') {
+      if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) {
+        return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'response belongs to another connection generation'))
+      }
+      try {
+        return this.resolveOutgoing(frame)
+      } catch (error) {
+        return this.fatal(error)
+      }
+    }
     this.sequence = this.sequence.then(() => this.dispatch(frame)).catch(error => this.fatal(error))
     return undefined
   }
@@ -558,7 +568,6 @@ export class CompatHost {
     if (frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'frame belongs to another connection generation'))
     if (this.phase !== 'ready') return
     if (frame.kind === 'hello' || frame.kind === 'ready') return this.fault(frame, new BridgeError('HANDSHAKE_COMPLETE', 'handshake already completed'))
-    if (frame.kind === 'response' || frame.kind === 'error') return this.resolveOutgoing(frame)
     if (frame.kind === 'heartbeat') {
       if (frame.requestId !== undefined) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'heartbeat must not have requestId'))
       this.write('heartbeat', { ok: true })

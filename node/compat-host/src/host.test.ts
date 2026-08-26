@@ -40,6 +40,22 @@ test('route registration flushes registration then removal', async () => {
   assert.deepEqual(calls.map(([kind]) => kind), ['web.route.register', 'web.route.unregister'])
 })
 
+test('nested callback responses bypass the serialized plugin request', async () => {
+  const value = host()
+  const responses: bigint[] = []
+  value.sequence = Promise.resolve()
+  value.respond = (frame: Frame) => responses.push(frame.requestId!)
+  value.operation = async () => value.beginRemote('web.route.register', { routeId: 'route' }).promise
+  value.receive({ protocolVersion, connectionGeneration: 5n, kind: 'plugin.load', requestId: 1n, payload: {} } as Frame)
+  await Promise.resolve()
+  await Promise.resolve()
+  value.receive({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 2n, payload: {} } as Frame)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.deepEqual(responses, [1n])
+})
+
+
 test('route invoke adapts a bounded request and completed response', async () => {
   const value = host()
   value.routes.set('5:route:1', {
