@@ -582,7 +582,6 @@ export class CompatHost {
     if (frame.kind === 'exit') {
       await this.shutdown()
       if (frame.requestId !== undefined) this.respond(frame, { drained: true })
-      this.write('exit', { drained: true })
       process.stdin.pause()
       process.exitCode = 0
       queueMicrotask(() => process.exit())
