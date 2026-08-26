@@ -430,7 +430,8 @@ export class CompatHost {
     const method = text(payload.method, 'method')
     if (!headerName.test(method)) throw new BridgeError('INVALID_ROUTE_REQUEST', 'method is invalid')
     const path = routePath(payload.path)
-    const query = payload.query === undefined || payload.query === null ? '' : text(payload.query, 'query')
+    const query = payload.query === undefined || payload.query === null ? '' : payload.query
+    if (typeof query !== 'string') throw new BridgeError('INVALID_ROUTE_REQUEST', 'query must be a string')
     if (query.includes('\0') || query.includes('#')) throw new BridgeError('INVALID_ROUTE_REQUEST', 'query is invalid')
     const requestHeaders = headers(payload.headers)
     const body = frameBody(payload.bodyBase64, maxRouteRequestBytes, 'bodyBase64')

@@ -62,13 +62,13 @@ test('route invoke adapts a bounded request and completed response', async () =>
     id: '5:route:1', kind: 'exact', path: '/dsh-market/test', registered: true, removed: false, pending: Promise.resolve(),
     handler: (request: any, response: any) => {
       assert.equal(request.method, 'POST')
-      assert.equal(request.url, '/dsh-market/test?a=1')
+      assert.equal(request.url, '/dsh-market/test')
       assert.equal(request.socket.remoteAddress, '127.0.0.1')
       response.writeHead(201, { 'x-result': 'yes' })
       response.end('ok')
     },
   })
-  const result = await value.invokeRoute({ routeId: '5:route:1', method: 'POST', path: '/dsh-market/test', query: 'a=1', headers: [], bodyBase64: '' }, new AbortController().signal)
+  const result = await value.invokeRoute({ routeId: '5:route:1', method: 'POST', path: '/dsh-market/test', query: '', headers: [], bodyBase64: '' }, new AbortController().signal)
   assert.deepEqual(result, { status: 201, headers: [['x-result', 'yes']], bodyBase64: 'b2s=' })
 })
 test('pnpm output streams before completion and cancel is correlated', async () => {
