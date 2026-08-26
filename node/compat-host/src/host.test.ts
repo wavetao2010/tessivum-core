@@ -94,10 +94,15 @@ test('a nested pnpm run cancels on a concurrent route request', async () => {
   const frames: [string, bigint | undefined][] = []
   const responses: bigint[] = []
   const errors: bigint[] = []
+  let rejectObserved!: () => void
+  const rejectedRoute = new Promise<void>(resolve => { rejectObserved = resolve })
   let handle!: { done: Promise<unknown>; cancel(): boolean }
   value.write = (kind: string, _payload: unknown, requestId?: bigint) => frames.push([kind, requestId])
   value.respond = (frame: Frame) => responses.push(frame.requestId!)
-  value.respondError = (frame: Frame) => errors.push(frame.requestId!)
+  value.respondError = (frame: Frame) => {
+    errors.push(frame.requestId!)
+    rejectObserved()
+  }
   value.invokeRoute = async (payload: Record<string, unknown>) => {
     if (payload.routeId === 'install') {
       handle = value.runPlugin(['install', '--ignore-scripts'], process.cwd())
@@ -110,8 +115,7 @@ test('a nested pnpm run cancels on a concurrent route request', async () => {
   value.receive({ protocolVersion, connectionGeneration: 5n, kind: 'web.route.request', requestId: 1n, payload: { routeId: 'install' } } as Frame)
   await Promise.resolve()
   value.receive({ protocolVersion, connectionGeneration: 5n, kind: 'web.route.request', requestId: 3n, payload: { routeId: 'cancel' } } as Frame)
-  await Promise.resolve()
-  await Promise.resolve()
+  await rejectedRoute
   assert.deepEqual(frames, [['pnpm.run', 2n], ['cancel', 2n]])
   assert.deepEqual(responses, [3n])
   assert.deepEqual(errors, [1n])

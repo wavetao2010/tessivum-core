@@ -267,10 +267,20 @@ impl ClientInner {
                     .iter()
                     .map(|value| value.as_str().map(str::to_owned))
                     .collect::<Option<BTreeSet<_>>>()
-                    .ok_or_else(|| BridgeError::Handshake("ready capabilities must be strings".into()))?,
-                Some(_) => return Err(BridgeError::Handshake("ready capabilities must be an array".into())),
+                    .ok_or_else(|| {
+                        BridgeError::Handshake("ready capabilities must be strings".into())
+                    })?,
+                Some(_) => {
+                    return Err(BridgeError::Handshake(
+                        "ready capabilities must be an array".into(),
+                    ))
+                }
             },
-            _ => return Err(BridgeError::Handshake("ready payload must be an object".into())),
+            _ => {
+                return Err(BridgeError::Handshake(
+                    "ready payload must be an object".into(),
+                ))
+            }
         };
         let mut state = lock(&self.state);
         if matches!(&*state, ConnectionState::Handshaking) {
@@ -409,8 +419,8 @@ impl ClientInner {
     }
 
     fn dispatch_request_serial(&self, frame: Frame) {
-        let result = lock(&self.handler)
-            .clone()
+        let handler = lock(&self.handler).clone();
+        let result = handler
             .ok_or_else(|| {
                 BridgeError::Remote(RemoteError::new(
                     "unsupported_request",
@@ -434,7 +444,7 @@ impl ClientInner {
         };
         let _ = self.send(response);
     }
- }
+}
 
 /// A bounded, generation-checked connection to a single Node compat host.
 #[derive(Clone)]
@@ -574,14 +584,20 @@ impl BridgeClient {
 
     /// Emits one bounded, uncorrelated peer notification while ready.
     pub fn notify(&self, kind: FrameKind, payload: Value) -> BridgeResult<()> {
-        if kind.is_request() || matches!(kind, FrameKind::Response | FrameKind::Error | FrameKind::Cancel) {
+        if kind.is_request()
+            || matches!(
+                kind,
+                FrameKind::Response | FrameKind::Error | FrameKind::Cancel
+            )
+        {
             return Err(BridgeError::InvalidFrame(format!(
                 "{} is not a notification operation",
                 kind.as_str()
             )));
         }
         self.require_ready()?;
-        self.inner.send(Frame::new(self.generation(), kind, payload))
+        self.inner
+            .send(Frame::new(self.generation(), kind, payload))
     }
 
     pub fn heartbeat(&self) -> BridgeResult<()> {

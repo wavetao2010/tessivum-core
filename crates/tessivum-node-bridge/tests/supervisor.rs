@@ -154,7 +154,11 @@ fn client_accepts_a_log_before_ready() {
         codec
             .write_frame(
                 &mut peer,
-                &Frame::new(9, FrameKind::Ready, json!({ "capabilities": ["web.route/v1"] })),
+                &Frame::new(
+                    9,
+                    FrameKind::Ready,
+                    json!({ "capabilities": ["web.route/v1"] }),
+                ),
             )
             .expect("test host sends ready capability");
     });
@@ -197,7 +201,11 @@ fn client_correlates_a_response_after_a_valid_handshake() {
             .expect("client request follows ready");
         assert_eq!(request.kind, FrameKind::PluginSnapshot);
         let request_id = request.request_id.expect("plugin request is correlated");
-        assert_eq!(request_id % 2, 1, "Rust-originated requests use odd correlations");
+        assert_eq!(
+            request_id % 2,
+            1,
+            "Rust-originated requests use odd correlations"
+        );
         codec
             .write_frame(
                 &mut peer,
@@ -216,7 +224,10 @@ fn client_correlates_a_response_after_a_valid_handshake() {
     client
         .handshake(Duration::from_secs(1))
         .expect("matching ready succeeds");
-    assert!(!client.supports_extension("web.route/v1"), "old empty ready advertises no extensions");
+    assert!(
+        !client.supports_extension("web.route/v1"),
+        "old empty ready advertises no extensions"
+    );
     assert_eq!(
         client
             .request(
@@ -541,11 +552,15 @@ fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
         .expect("client owns the stream pair");
     let state = Arc::new((Mutex::new(false), Condvar::new()));
     let observed = Arc::clone(&state);
-    client.set_handler(Arc::new(move |frame| {
+    let (events, observed_events) = mpsc::channel();
+    client.set_handler(Arc::new(move |frame: Frame| {
         let (cancelled, changed) = &*observed;
         let mut cancelled = cancelled.lock().expect("state lock holds");
         match frame.kind {
             FrameKind::PnpmRun => {
+                events
+                    .send(FrameKind::PnpmRun)
+                    .expect("test observes pnpm run");
                 while !*cancelled {
                     cancelled = changed.wait(cancelled).expect("state wait holds");
                 }
@@ -554,25 +569,60 @@ fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
             FrameKind::Cancel => {
                 *cancelled = true;
                 changed.notify_all();
+                events
+                    .send(FrameKind::Cancel)
+                    .expect("test observes cancellation");
                 Ok(json!({}))
             }
-            _ => Err(tessivum_node_bridge::BridgeError::InvalidFrame("unexpected test frame".into())),
+            _ => Err(tessivum_node_bridge::BridgeError::InvalidFrame(
+                "unexpected test frame".into(),
+            )),
         }
     }));
-    let host = thread::spawn(move || {
+    let (host_done, observed_host) = mpsc::channel();
+    thread::spawn(move || {
         let codec = FrameCodec::default();
-        assert_eq!(codec.read_frame(&mut peer).expect("client sends hello").kind, FrameKind::Hello);
-        codec.write_frame(&mut peer, &Frame::ready(41)).expect("test host sends ready");
-        codec.write_frame(
-            &mut peer,
-            &Frame::request(41, 9, FrameKind::PnpmRun, json!({ "operationId": "op" })),
-        ).expect("test host sends pnpm run");
-        codec.write_frame(&mut peer, &Frame::cancel(41, 9)).expect("test host cancels pnpm run");
-        let response = codec.read_frame(&mut peer).expect("cancelled pnpm run responds");
+        assert_eq!(
+            codec
+                .read_frame(&mut peer)
+                .expect("client sends hello")
+                .kind,
+            FrameKind::Hello
+        );
+        codec
+            .write_frame(&mut peer, &Frame::ready(41))
+            .expect("test host sends ready");
+        codec
+            .write_frame(
+                &mut peer,
+                &Frame::request(41, 9, FrameKind::PnpmRun, json!({ "operationId": "op" })),
+            )
+            .expect("test host sends pnpm run");
+        codec
+            .write_frame(&mut peer, &Frame::cancel(41, 9))
+            .expect("test host cancels pnpm run");
+        let response = codec
+            .read_frame(&mut peer)
+            .expect("cancelled pnpm run responds");
         assert_eq!(response.kind, FrameKind::Response);
         assert_eq!(response.request_id, Some(9));
+        host_done.send(()).expect("test observes host response");
     });
-    client.handshake(Duration::from_secs(1)).expect("matching ready succeeds");
-    host.join().expect("test host settles");
+    client
+        .handshake(Duration::from_secs(1))
+        .expect("matching ready succeeds");
+    let events = [
+        observed_events
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap(),
+        observed_events
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap(),
+    ];
+    assert!(events.contains(&FrameKind::PnpmRun));
+    assert!(events.contains(&FrameKind::Cancel));
+    observed_host
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cancelled pnpm run returns a response");
     client.close();
 }

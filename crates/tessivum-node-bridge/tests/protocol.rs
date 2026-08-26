@@ -137,14 +137,21 @@ fn frozen_extension_kinds_serialize_exactly_as_protocol_names() {
         let encoded = codec.encode(&frame).expect("extension request encodes");
         let wire: serde_json::Value = serde_json::from_slice(&encoded[4..]).expect("wire is JSON");
         assert_eq!(wire["kind"], name);
-        assert_eq!(codec.decode(&encoded).expect("extension request decodes"), frame);
+        assert_eq!(
+            codec.decode(&encoded).expect("extension request decodes"),
+            frame
+        );
     }
 }
 
 #[test]
 fn pnpm_output_is_an_uncorrelated_notification() {
     let codec = FrameCodec::default();
-    let frame = Frame::new(7, FrameKind::PnpmOutput, json!({ "operationId": "op", "stream": "stdout", "chunkBase64": "" }));
+    let frame = Frame::new(
+        7,
+        FrameKind::PnpmOutput,
+        json!({ "operationId": "op", "stream": "stdout", "chunkBase64": "" }),
+    );
     assert!(!frame.kind.is_request());
     let encoded = codec.encode(&frame).expect("notification encodes");
     let wire: serde_json::Value = serde_json::from_slice(&encoded[4..]).expect("wire is JSON");
