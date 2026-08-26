@@ -4,6 +4,8 @@ import test from 'node:test'
 import { CompatHost } from './host.ts'
 import { protocolVersion, type Frame } from './protocol.ts'
 
+const { WebSocket, WebSocketServer } = await import(String('ws'))
+
 function host() {
   const value = Object.create(CompatHost.prototype) as any
   Object.assign(value, {
@@ -61,6 +63,29 @@ test('upgrade registration publishes and removes its loopback backend', async ()
   dispose()
   await value.flushRoutes()
   assert.equal(calls[1]?.[0], 'web.upgrade.unregister')
+})
+test('upgrade backend carries ws noServer connections', async () => {
+  const value = host()
+  value.preloadSession = () => Promise.resolve()
+  const wss = new WebSocketServer({ noServer: true })
+  value.upgrades.set('test', {
+    id: 'test', path: '/sidebar/ws/test', registered: true, removed: false, pending: Promise.resolve(),
+    handler: (request: any, socket: any, head: Buffer) => {
+      wss.handleUpgrade(request, socket, head, (client: any) => client.send('ready'))
+    },
+  })
+  const port = await value.startUpgradeServer()
+  const client = new WebSocket(`ws://127.0.0.1:${port}/sidebar/ws/test`, {
+    headers: { 'x-tessivum-upgrade-token': 'a'.repeat(64) },
+  })
+
+  const message = await new Promise<string>((resolve, reject) => {
+    client.once('message', (data: any) => resolve(data.toString()))
+    client.once('error', reject)
+  })
+  assert.equal(message, 'ready')
+  client.close()
+  value.upgradeServer.stop(true)
 })
 
 test('tool facade registers an executable native callback', async () => {
