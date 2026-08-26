@@ -11,6 +11,8 @@ function host() {
     phase: 'ready',
     routes: new Map(),
     routeTasks: new Set(),
+    upgrades: new Map(),
+    upgradeToken: 'a'.repeat(64),
     routeFailure: undefined,
     pnpmOperations: new Map(),
     outgoing: new Map(),
@@ -18,7 +20,10 @@ function host() {
     incoming: new Map(),
     activeInvokes: 0,
     nextRequestId: 2n,
+    callbacks: new Map(),
+    sessions: new Map(),
     nextRouteId: 1n,
+    nextToolId: 1n,
     nextOperationId: 1n,
     profile: { name: 'web', dir: process.cwd() },
     write: () => undefined,
@@ -38,6 +43,51 @@ test('route registration flushes registration then removal', async () => {
   dispose()
   await value.flushRoutes()
   assert.deepEqual(calls.map(([kind]) => kind), ['web.route.register', 'web.route.unregister'])
+})
+
+test('upgrade registration publishes and removes its loopback backend', async () => {
+  const value = host()
+  const calls: [string, any][] = []
+  value.startUpgradeServer = () => Promise.resolve(43123)
+  value.requestRemote = (kind: string, payload: unknown) => {
+    calls.push([kind, payload])
+    return Promise.resolve({})
+  }
+  const dispose = value.registerUpgrade({ path: '/sidebar/ws/test', handler: () => undefined })
+  await value.flushRoutes()
+  assert.equal(calls[0]?.[0], 'web.upgrade.register')
+  assert.equal(calls[0]?.[1].port, 43123)
+  assert.equal(calls[0]?.[1].token, 'a'.repeat(64))
+  dispose()
+  await value.flushRoutes()
+  assert.equal(calls[1]?.[0], 'web.upgrade.unregister')
+})
+
+test('tool facade registers an executable native callback', async () => {
+  const value = host()
+  const calls: [string, any][] = []
+  value.requestRemote = (kind: string, payload: unknown) => {
+    calls.push([kind, payload])
+    return Promise.resolve({})
+  }
+  const dispose = value.registerTool({
+    name: 'sidebar_open',
+    description: 'Open the sidebar',
+    parameters: { type: 'object', properties: {} },
+    output: { render: (_args: unknown, result: unknown) => [{ type: 'text', text: String(result) }] },
+    execute: async () => 'opened',
+  })
+  await value.flushRoutes()
+  const registration = calls[0]?.[1].params
+  const callback = value.callbacks.get(registration.callbackId)
+  assert.deepEqual(await callback({ context: { session: 's', call: 'c' }, arguments: {} }, new AbortController().signal), {
+    content: [{ type: 'text', text: 'opened' }],
+    isError: false,
+    meta: { value: 'opened' },
+  })
+  dispose()
+  await value.flushRoutes()
+  assert.equal(calls[1]?.[0], 'registration.dispose')
 })
 
 test('nested callback responses bypass the serialized plugin request', async () => {

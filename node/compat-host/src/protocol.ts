@@ -9,7 +9,8 @@ export const frameKinds = [
   'plugin.load', 'plugin.update', 'plugin.dispose', 'plugin.snapshot',
   'service.call', 'service.provide', 'service.remove',
   'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose',
-  'web.route.register', 'web.route.unregister', 'web.route.request', 'pnpm.run', 'pnpm.output',
+  'web.route.register', 'web.route.unregister', 'web.route.request',
+  'web.upgrade.register', 'web.upgrade.unregister', 'pnpm.run', 'pnpm.output',
 ] as const
 
 export type FrameKind = typeof frameKinds[number]
@@ -19,7 +20,8 @@ const requestKindSet = new Set<string>([
   'exit', 'plugin.load', 'plugin.update', 'plugin.dispose', 'plugin.snapshot',
   'service.call', 'service.provide', 'service.remove',
   'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose',
-  'web.route.register', 'web.route.unregister', 'web.route.request', 'pnpm.run',
+  'web.route.register', 'web.route.unregister', 'web.route.request',
+  'web.upgrade.register', 'web.upgrade.unregister', 'pnpm.run',
 ])
 
 export function isRequestKind(kind: string): kind is FrameKind {

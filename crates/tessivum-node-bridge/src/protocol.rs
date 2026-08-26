@@ -61,6 +61,10 @@ pub enum FrameKind {
     WebRouteRemove,
     #[serde(rename = "web.route.request")]
     WebRouteInvoke,
+    #[serde(rename = "web.upgrade.register")]
+    WebUpgradeRegister,
+    #[serde(rename = "web.upgrade.unregister")]
+    WebUpgradeRemove,
     #[serde(rename = "pnpm.run")]
     PnpmRun,
     #[serde(rename = "pnpm.output")]
@@ -86,6 +90,8 @@ impl FrameKind {
                 | Self::WebRouteRegister
                 | Self::WebRouteRemove
                 | Self::WebRouteInvoke
+                | Self::WebUpgradeRegister
+                | Self::WebUpgradeRemove
                 | Self::PnpmRun
         )
     }
@@ -263,6 +269,8 @@ impl FrameKind {
             Self::WebRouteRegister => "web.route.register",
             Self::WebRouteRemove => "web.route.unregister",
             Self::WebRouteInvoke => "web.route.request",
+            Self::WebUpgradeRegister => "web.upgrade.register",
+            Self::WebUpgradeRemove => "web.upgrade.unregister",
             Self::PnpmRun => "pnpm.run",
             Self::PnpmOutput => "pnpm.output",
         }

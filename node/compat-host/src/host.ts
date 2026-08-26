@@ -1,7 +1,9 @@
 import { Buffer } from 'node:buffer'
+import { randomBytes } from 'node:crypto'
+import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
-import { PassThrough, Readable } from 'node:stream'
+import { PassThrough, Readable, type Duplex } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import { FrameDecoder, ProtocolError, defaultMaxFrameBytes, encodeFrame, frameKinds, protocolVersion, type Frame } from './protocol.ts'
 
@@ -46,12 +48,22 @@ type Route = {
   removed: boolean
   pending: Promise<unknown>
 }
+type UpgradeRoute = {
+  id: string
+  path: string
+  owner?: string
+  handler(request: IncomingMessage, socket: Duplex, head: Buffer): unknown
+  registered: boolean
+  removed: boolean
+  pending: Promise<unknown>
+}
 type PnpmOperation = {
   stdout: PassThrough
   stderr: PassThrough
 }
 type Profile = { name: string; dir: string }
 type RemoteRequest = { requestId: bigint; promise: Promise<unknown> }
+type SessionSnapshot = { id: string; header: RecordValue; events: unknown[] }
 
 const maxRouteRequestBytes = 2 * 1024 * 1024
 const maxRouteResponseBytes = 8 * 1024 * 1024
@@ -68,7 +80,7 @@ const operationKinds = new Set([
   'service.call', 'service.provide', 'service.remove',
   'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose', 'web.route.request',
 ])
-const knownKinds = new Set(frameKinds)
+const knownKinds = new Set<string>(frameKinds)
 const rawStdoutWrite = process.stdout.write.bind(process.stdout) as (chunk: Uint8Array) => boolean
 
 class BridgeError extends Error {
@@ -158,7 +170,7 @@ function routePath(value: unknown) {
     throw new BridgeError('INVALID_ROUTE', 'route path has invalid escapes')
   }
   if (decoded.split('/').some(segment => segment === '.' || segment === '..')) throw new BridgeError('INVALID_ROUTE', 'route path traversal is forbidden')
-  if (path !== '/dsh-market' && !path.startsWith('/dsh-market/')) throw new BridgeError('INVALID_ROUTE', 'route path must stay below /dsh-market')
+  if (!['/dsh-market', '/sidebar'].some(root => path === root || path.startsWith(`${root}/`))) throw new BridgeError('INVALID_ROUTE', 'route path is outside the supported compatibility roots')
   return path
 }
 
@@ -240,11 +252,17 @@ function installVendorResolver(vendor: string) {
   }
   const hostRoot = process.env.TESSIVUM_HOST_MODULE_ROOT
   if (hostRoot) {
-    aliases['@deepseek-ai/dsh-settings'] = join(hostRoot, '@deepseek-ai', 'dsh-settings', 'lib', 'index.js')
-    aliases['@deepseek-ai/schemastery'] = join(hostRoot, '@deepseek-ai', 'schemastery', 'lib', 'index.mjs')
-    for (const path of Object.values(aliases).slice(-2)) {
+    const hostAliases: Record<string, string> = {
+      '@deepseek-ai/dsh-settings': join(hostRoot, '@deepseek-ai', 'dsh-settings', 'lib', 'index.js'),
+      '@deepseek-ai/schemastery': join(hostRoot, '@deepseek-ai', 'schemastery', 'lib', 'index.mjs'),
+      '@deepseek-ai/dsh-tools': join(hostRoot, '@deepseek-ai', 'dsh-tools', 'index.js'),
+      '@deepseek-ai/dsh-llm': join(hostRoot, '@deepseek-ai', 'dsh-llm', 'index.js'),
+      '@deepseek-ai/dsh-subagent/descriptor': join(hostRoot, '@deepseek-ai', 'dsh-subagent', 'descriptor.js'),
+    }
+    for (const path of Object.values(hostAliases)) {
       if (!existsSync(path)) throw new BridgeError('HOST_MODULES_NOT_FOUND', `Host compatibility module is missing: ${path}`)
     }
+    Object.assign(aliases, hostAliases)
   }
   Bun.plugin({
     name: 'tessivum-vendored-cordis',
@@ -298,7 +316,7 @@ export class CompatHost {
   private loader: Loader | undefined
   private readonly plugins = new Map<string, PluginRecord>()
   private readonly registrations = new Map<string, Registration>()
-  private readonly callbacks = new Map<string, (...args: unknown[]) => unknown>()
+  private readonly callbacks = new Map<string, (...args: any[]) => unknown>()
   private readonly incoming = new Map<string, Incoming>()
   private readonly outgoing = new Map<string, Outgoing>()
   private nextRequestId = 2n
@@ -311,6 +329,12 @@ export class CompatHost {
   private readonly pnpmOperations = new Map<string, PnpmOperation>()
   private nextRouteId = 1n
   private nextOperationId = 1n
+  private readonly upgrades = new Map<string, UpgradeRoute>()
+  private readonly upgradeToken = randomBytes(32).toString('hex')
+  private upgradeServer: Server | undefined
+  private upgradePort: Promise<number> | undefined
+  private nextToolId = 1n
+  private readonly sessions = new Map<string, SessionSnapshot>()
   private activeInvokes = 0
   private loadingPlugin: string | undefined
 
@@ -406,6 +430,7 @@ export class CompatHost {
 
   private async removeRoutes(owner?: string) {
     for (const route of [...this.routes.values()]) if (owner === undefined || route.owner === owner) this.removeRoute(route)
+    for (const route of [...this.upgrades.values()]) if (owner === undefined || route.owner === owner) this.removeUpgrade(route)
     await this.flushRoutes()
   }
 
@@ -421,8 +446,171 @@ export class CompatHost {
     }
   }
 
+  private startUpgradeServer() {
+    if (this.upgradePort) return this.upgradePort
+    const server = createServer((_request, response) => {
+      response.writeHead(404)
+      response.end()
+    })
+    server.on('upgrade', (request, socket, head) => {
+      if (request.headers['x-tessivum-upgrade-token'] !== this.upgradeToken) {
+        socket.destroy()
+        return
+      }
+      let url: URL
+      try {
+        url = new URL(request.url ?? '/', 'http://tessivum.internal')
+      } catch {
+        socket.destroy()
+        return
+      }
+      const route = [...this.upgrades.values()].find(candidate => !candidate.removed && candidate.path === url.pathname)
+      if (!route) {
+        socket.destroy()
+        return
+      }
+      socket.pause()
+      void this.preloadSession(url.searchParams.toString(), Buffer.alloc(0)).then(() => {
+        if (route.removed) return socket.destroy()
+        socket.resume()
+        route.handler(request, socket, head)
+      }, () => socket.destroy())
+    })
+    this.upgradeServer = server
+    this.upgradePort = new Promise<number>((resolvePort, reject) => {
+      const startupFailure = (error: Error) => reject(error)
+      server.once('error', startupFailure)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', startupFailure)
+        server.on('error', error => void this.fatal(error))
+        const address = server.address()
+        if (address === null || typeof address === 'string') return reject(new BridgeError('UPGRADE_LISTEN_FAILED', 'upgrade backend did not bind a TCP port'))
+        resolvePort(address.port)
+      })
+    })
+    return this.upgradePort
+  }
+
+  private registerUpgrade(value: unknown) {
+    const definition = object(value, 'upgrade registration')
+    const path = routePath(definition.path)
+    if (typeof definition.handler !== 'function') throw new BridgeError('INVALID_ROUTE', 'upgrade handler must be a function')
+    if ([...this.upgrades.values()].some(route => !route.removed && route.path === path)) throw new BridgeError('DUPLICATE_ROUTE', `upgrade route ${path} already exists`)
+    const route: UpgradeRoute = {
+      id: `${this.generation}:upgrade:${this.nextRouteId++}`,
+      path,
+      owner: this.loadingPlugin,
+      handler: definition.handler as UpgradeRoute['handler'],
+      registered: false,
+      removed: false,
+      pending: Promise.resolve(),
+    }
+    route.pending = this.trackRoute(this.startUpgradeServer().then(port => this.requestRemote('web.upgrade.register', {
+      routeId: route.id,
+      path,
+      port,
+      token: this.upgradeToken,
+    })).then(() => { route.registered = true }))
+    void route.pending.catch(() => undefined)
+    this.upgrades.set(route.id, route)
+    return () => this.removeUpgrade(route)
+  }
+
+  private removeUpgrade(route: UpgradeRoute) {
+    if (route.removed) return
+    route.removed = true
+    this.upgrades.delete(route.id)
+    if (this.phase !== 'ready') return
+    route.pending = this.trackRoute(route.pending.then(() => route.registered ? this.requestRemote('web.upgrade.unregister', { routeId: route.id }) : undefined))
+    void route.pending.catch(() => undefined)
+  }
+
+  private async preloadSession(query: string, body: Buffer) {
+    let sessionId = new URLSearchParams(query).get('sessionId') ?? undefined
+    if (sessionId === undefined && body.byteLength > 0) {
+      try {
+        const payload = JSON.parse(body.toString('utf8')) as RecordValue
+        sessionId = optionalText(payload.sessionId) ?? optionalText(payload.rootSessionId)
+      } catch {
+        return
+      }
+    }
+    if (sessionId === undefined) return
+    let result: RecordValue
+    try {
+      result = object(await this.requestRemote('service.call', {
+        service: 'sessions@1',
+        method: 'snapshot',
+        params: { session: sessionId },
+      }), 'session snapshot result')
+    } catch (error) {
+      if (error instanceof BridgeError && (error.details as RecordValue | undefined)?.code === 'SESSION_NOT_FOUND') return
+      throw error
+    }
+    const value = object(result.session, 'session snapshot')
+    const events = value.events
+    if (!Array.isArray(events)) throw new BridgeError('INVALID_SESSION', 'session snapshot events must be an array')
+    const session: SessionSnapshot = {
+      id: text(value.id, 'session snapshot id'),
+      header: object(value.header, 'session snapshot header'),
+      events,
+    }
+    this.sessions.set(sessionId, session)
+    if (this.sessions.size > 128) this.sessions.delete(this.sessions.keys().next().value!)
+  }
+
+  private registerTool(value: unknown) {
+    const tool = object(value, 'tool definition')
+    const name = text(tool.name, 'tool name')
+    const description = text(tool.description, 'tool description')
+    if (typeof tool.execute !== 'function') throw new BridgeError('INVALID_TOOL', `tool ${name} has no execute function`)
+    const output = object(tool.output, 'tool output')
+    if (typeof output.render !== 'function') throw new BridgeError('INVALID_TOOL', `tool ${name} has no output renderer`)
+    const execute = tool.execute as (arguments_: unknown, context: RecordValue) => unknown
+    const render = output.render as (arguments_: unknown, value: unknown) => unknown
+    const id = this.nextToolId++
+    const registrationId = `${this.generation}:tool:${id}`
+    const callbackId = `${registrationId}:execute`
+    this.callbacks.set(callbackId, async (payload, signal) => {
+      const request = object(payload, 'tool callback')
+      const context = object(request.context, 'tool callback context')
+      const sessionId = text(context.session, 'tool callback session')
+      const session = this.sessions.get(sessionId) ?? { id: sessionId, header: {}, events: [] }
+      const value = await execute(request.arguments, {
+        signal: signal ?? new AbortController().signal,
+        agent: { session },
+        call: context.call,
+      })
+      return { content: render(request.arguments, value), isError: false, meta: { value } }
+    })
+    let registered = false
+    let disposed = false
+    const remove = () => this.requestRemote('registration.dispose', { registrationId })
+    const pending = this.requestRemote('service.provide', {
+      service: 'tools@1',
+      method: 'register',
+      params: { registrationId, callbackId, name, description, parameters: tool.parameters },
+    }).then(() => {
+      registered = true
+      if (disposed) return remove()
+    })
+    this.trackRoute(pending)
+    return () => {
+      if (disposed) return
+      disposed = true
+      this.callbacks.delete(callbackId)
+      if (registered) this.trackRoute(remove())
+    }
+  }
+
   private installCompatibilityServices() {
-    this.context().provide('webServer', { register: (definition: unknown) => this.registerRoute(definition) })
+    this.context().provide('webServer', {
+      register: (definition: unknown) => this.registerRoute(definition),
+      registerUpgrade: (definition: unknown) => this.registerUpgrade(definition),
+    })
+    this.context().provide('sessions', { get: (id: string) => this.sessions.get(id) })
+    this.context().provide('webRuntime', { trustedHosts: Object.freeze([]) })
+    this.context().provide('tools', { register: (tool: unknown) => this.registerTool(tool) })
     if (!this.profile) return
     this.context().provide('desktopProfiles', { current: { name: this.profile.name, dir: this.profile.dir } })
     this.context().provide('desktopPnpm', { runPlugin: (args: unknown, invokingDir: unknown, signal?: AbortSignal) => this.runPlugin(args, invokingDir, signal) })
@@ -439,6 +627,7 @@ export class CompatHost {
     if (query.includes('\0') || query.includes('#')) throw new BridgeError('INVALID_ROUTE_REQUEST', 'query is invalid')
     const requestHeaders = headers(payload.headers)
     const body = frameBody(payload.bodyBase64, maxRouteRequestBytes, 'bodyBase64')
+    await this.preloadSession(query, body)
     abortIfNeeded(signal)
     const request = Readable.from(body) as Readable & RecordValue
     request.method = method
@@ -480,14 +669,14 @@ export class CompatHost {
       if (output.ended()) throw new BridgeError('LATE_RESPONSE', 'response already ended')
       response.statusCode = status
       const values = typeof statusOrHeaders === 'object' ? statusOrHeaders : maybeHeaders
-      if (values) for (const [name, value] of Object.entries(values)) response.setHeader(name, value)
+      if (values) for (const [name, value] of Object.entries(values)) (response.setHeader as (name: string, value: unknown) => unknown)(name, value)
       return response
     }
     await settled(route.handler(request, response))
     abortIfNeeded(signal)
     if (!output.ended()) throw new BridgeError('INCOMPLETE_RESPONSE', 'route handler returned without ending its response')
-    if (!Number.isInteger(response.statusCode) || response.statusCode < 100 || response.statusCode > 599) throw new BridgeError('INVALID_RESPONSE', 'response status is invalid')
-    return { status: response.statusCode, headers: [...responseHeaders.values()], bodyBase64: output.body().toString('base64') }
+    if (!Number.isInteger(statusCode) || statusCode < 100 || statusCode > 599) throw new BridgeError('INVALID_RESPONSE', 'response status is invalid')
+    return { status: statusCode, headers: [...responseHeaders.values()], bodyBase64: output.body().toString('base64') }
   }
 
   private async initialize() {
@@ -567,7 +756,7 @@ export class CompatHost {
       this.generation = frame.connectionGeneration
       await this.initialize()
       this.phase = 'ready'
-      this.write('ready', { protocolVersion, maxFrameBytes: this.maxFrameBytes, vendoredCordis: true, capabilities: ['web.route/v1'] })
+      this.write('ready', { protocolVersion, maxFrameBytes: this.maxFrameBytes, vendoredCordis: true, capabilities: ['web.route/v1', 'web.upgrade/v1'] })
       return
     }
     if (frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'frame belongs to another connection generation'))
@@ -883,7 +1072,9 @@ export class CompatHost {
     if (!callback) throw new BridgeError('UNKNOWN_CALLBACK', `callback ${callbackId} is not registered`)
     const args = payload.args === undefined ? [] : payload.args
     if (!Array.isArray(args)) throw new BridgeError('INVALID_PAYLOAD', 'event.callback args must be an array')
-    const result = await settled(callback(...args))
+    const result = Object.hasOwn(payload, 'payload')
+      ? await settled(callback(payload.payload, signal))
+      : await settled(callback(...args))
     abortIfNeeded(signal)
     return json(result)
   }
@@ -990,6 +1181,7 @@ export class CompatHost {
       this.outgoing.clear()
       this.cancelledOutgoing.clear()
       this.routes.clear()
+      this.upgrades.clear()
       for (const operation of this.pnpmOperations.values()) {
         operation.stdout.end()
         operation.stderr.end()
@@ -1003,6 +1195,7 @@ export class CompatHost {
       this.plugins.clear()
       this.registrations.clear()
       if (this.root) await Promise.allSettled([this.root.fiber.dispose()])
+      if (this.upgradeServer) await new Promise<void>(resolve => this.upgradeServer!.close(() => resolve()))
       this.phase = 'closed'
     })()
     return this.shutdownTask
