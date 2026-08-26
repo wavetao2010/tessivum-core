@@ -73,13 +73,18 @@ test('route invoke adapts a bounded request and completed response', async () =>
   assert.deepEqual(result.headers, [['x-result', 'yes']])
   assert.equal(Buffer.from(result.bodyBase64, 'base64').byteLength, 20_000)
 })
-test('pnpm output streams before completion and cancel is correlated', async () => {
+test('pnpm output streams beyond the consumer rolling-tail size and cancel is correlated', async () => {
   const value = host()
   const frames: [string, bigint | undefined][] = []
   value.write = (kind: string, _payload: unknown, requestId?: bigint) => frames.push([kind, requestId])
   const handle = value.runPlugin(['install', '--ignore-scripts'], process.cwd())
-  value.output({ protocolVersion, connectionGeneration: 5n, kind: 'pnpm.output', payload: { operationId: '5:pnpm:1', stream: 'stdout', chunkBase64: 'b2s=' } } as Frame)
-  assert.equal(handle.stdout.read().toString(), 'ok')
+  let bytes = 0
+  handle.stdout.on('data', (chunk: Buffer) => { bytes += chunk.byteLength })
+  const chunkBase64 = Buffer.alloc(16 * 1024, 'x').toString('base64')
+  for (let index = 0; index < 20; index += 1) {
+    value.output({ protocolVersion, connectionGeneration: 5n, kind: 'pnpm.output', payload: { operationId: '5:pnpm:1', stream: 'stdout', chunkBase64 } } as Frame)
+  }
+  assert.equal(bytes, 320 * 1024)
   assert.equal(handle.cancel(), true)
   await assert.rejects(handle.done)
   assert.doesNotThrow(() => value.output({ protocolVersion, connectionGeneration: 5n, kind: 'pnpm.output', payload: { operationId: '5:pnpm:1', stream: 'stdout', chunkBase64: 'b2s=' } } as Frame))

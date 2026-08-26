@@ -49,8 +49,6 @@ type Route = {
 type PnpmOperation = {
   stdout: PassThrough
   stderr: PassThrough
-  stdoutBytes: number
-  stderrBytes: number
 }
 type Profile = { name: string; dir: string }
 type RemoteRequest = { requestId: bigint; promise: Promise<unknown> }
@@ -60,8 +58,6 @@ const maxRouteResponseBytes = 8 * 1024 * 1024
 const maxRouteHeaders = 128
 const maxRouteHeaderBytes = 32 * 1024
 const maxPnpmOutputChunkBytes = 64 * 1024
-const maxPnpmStdoutBytes = 256 * 1024
-const maxPnpmStderrBytes = 64 * 1024
 const maxNodeRequestId = BigInt(Number.MAX_SAFE_INTEGER - 1)
 const hopByHopHeaders = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'])
 const headerName = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
@@ -241,6 +237,14 @@ function installVendorResolver(vendor: string) {
     cordis: join(vendor, 'cordis', 'lib', 'index.js'),
     cosmokit: join(vendor, 'cosmokit', 'lib', 'index.js'),
     '@cordisjs/plugin-loader': join(vendor, 'loader', 'lib', 'index.js'),
+  }
+  const hostRoot = process.env.TESSIVUM_HOST_MODULE_ROOT
+  if (hostRoot) {
+    aliases['@deepseek-ai/dsh-settings'] = join(hostRoot, '@deepseek-ai', 'dsh-settings', 'lib', 'index.js')
+    aliases['@deepseek-ai/schemastery'] = join(hostRoot, '@deepseek-ai', 'schemastery', 'lib', 'index.mjs')
+    for (const path of Object.values(aliases).slice(-2)) {
+      if (!existsSync(path)) throw new BridgeError('HOST_MODULES_NOT_FOUND', `Host compatibility module is missing: ${path}`)
+    }
   }
   Bun.plugin({
     name: 'tessivum-vendored-cordis',
@@ -901,16 +905,8 @@ export class CompatHost {
     const stream = text(payload.stream, 'stream')
     if (stream !== 'stdout' && stream !== 'stderr') throw new BridgeError('INVALID_PNPM_OUTPUT', 'stream must be stdout or stderr')
     const chunk = frameBody(payload.chunkBase64, maxPnpmOutputChunkBytes, 'chunkBase64')
-    const bytes = stream === 'stdout' ? operation.stdoutBytes : operation.stderrBytes
-    const limit = stream === 'stdout' ? maxPnpmStdoutBytes : maxPnpmStderrBytes
-    if (bytes + chunk.byteLength > limit) throw new BridgeError('PAYLOAD_TOO_LARGE', `${stream} exceeds ${limit} bytes`)
-    if (stream === 'stdout') {
-      operation.stdoutBytes += chunk.byteLength
-      operation.stdout.write(chunk)
-    } else {
-      operation.stderrBytes += chunk.byteLength
-      operation.stderr.write(chunk)
-    }
+    if (stream === 'stdout') operation.stdout.write(chunk)
+    else operation.stderr.write(chunk)
   }
 
   private runPlugin(args: unknown, invokingDir: unknown, signal?: AbortSignal) {
@@ -920,10 +916,8 @@ export class CompatHost {
     if (!isAbsolute(directory) || directory.includes('\0')) throw new BridgeError('INVALID_PNPM_DIR', 'invokingDir must be absolute')
     const operationId = `${this.generation}:pnpm:${this.nextOperationId++}`
     const operation: PnpmOperation = {
-      stdout: new PassThrough({ highWaterMark: maxPnpmStdoutBytes }),
-      stderr: new PassThrough({ highWaterMark: maxPnpmStderrBytes }),
-      stdoutBytes: 0,
-      stderrBytes: 0,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
     }
     this.pnpmOperations.set(operationId, operation)
     const remote = this.beginRemote('pnpm.run', { operationId, args, invokingDir: directory })
