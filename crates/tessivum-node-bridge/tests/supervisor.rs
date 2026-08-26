@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -152,13 +152,17 @@ fn client_accepts_a_log_before_ready() {
             )
             .expect("test host sends startup log");
         codec
-            .write_frame(&mut peer, &Frame::ready(9))
-            .expect("test host sends ready");
+            .write_frame(
+                &mut peer,
+                &Frame::new(9, FrameKind::Ready, json!({ "capabilities": ["web.route/v1"] })),
+            )
+            .expect("test host sends ready capability");
     });
 
     client
         .handshake(Duration::from_secs(1))
         .expect("a startup log does not abort the handshake");
+    assert!(client.supports_extension("web.route/v1"));
     assert_eq!(
         received_log
             .recv_timeout(Duration::from_secs(1))
@@ -193,6 +197,7 @@ fn client_correlates_a_response_after_a_valid_handshake() {
             .expect("client request follows ready");
         assert_eq!(request.kind, FrameKind::PluginSnapshot);
         let request_id = request.request_id.expect("plugin request is correlated");
+        assert_eq!(request_id % 2, 1, "Rust-originated requests use odd correlations");
         codec
             .write_frame(
                 &mut peer,
@@ -211,6 +216,7 @@ fn client_correlates_a_response_after_a_valid_handshake() {
     client
         .handshake(Duration::from_secs(1))
         .expect("matching ready succeeds");
+    assert!(!client.supports_extension("web.route/v1"), "old empty ready advertises no extensions");
     assert_eq!(
         client
             .request(
@@ -525,4 +531,48 @@ process.stdin.on("data", (chunk) => {
         "killing the host process group also kills its Bun grandchild"
     );
     let _ = fs::remove_file(pid_file);
+}
+
+#[test]
+fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
+    let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
+    let reader = socket.try_clone().expect("client read side clones");
+    let client = BridgeClient::from_io(reader, socket, 41, ClientConfig::default())
+        .expect("client owns the stream pair");
+    let state = Arc::new((Mutex::new(false), Condvar::new()));
+    let observed = Arc::clone(&state);
+    client.set_handler(Arc::new(move |frame| {
+        let (cancelled, changed) = &*observed;
+        let mut cancelled = cancelled.lock().expect("state lock holds");
+        match frame.kind {
+            FrameKind::PnpmRun => {
+                while !*cancelled {
+                    cancelled = changed.wait(cancelled).expect("state wait holds");
+                }
+                Ok(json!({ "exitCode": 130 }))
+            }
+            FrameKind::Cancel => {
+                *cancelled = true;
+                changed.notify_all();
+                Ok(json!({}))
+            }
+            _ => Err(tessivum_node_bridge::BridgeError::InvalidFrame("unexpected test frame".into())),
+        }
+    }));
+    let host = thread::spawn(move || {
+        let codec = FrameCodec::default();
+        assert_eq!(codec.read_frame(&mut peer).expect("client sends hello").kind, FrameKind::Hello);
+        codec.write_frame(&mut peer, &Frame::ready(41)).expect("test host sends ready");
+        codec.write_frame(
+            &mut peer,
+            &Frame::request(41, 9, FrameKind::PnpmRun, json!({ "operationId": "op" })),
+        ).expect("test host sends pnpm run");
+        codec.write_frame(&mut peer, &Frame::cancel(41, 9)).expect("test host cancels pnpm run");
+        let response = codec.read_frame(&mut peer).expect("cancelled pnpm run responds");
+        assert_eq!(response.kind, FrameKind::Response);
+        assert_eq!(response.request_id, Some(9));
+    });
+    client.handshake(Duration::from_secs(1)).expect("matching ready succeeds");
+    host.join().expect("test host settles");
+    client.close();
 }

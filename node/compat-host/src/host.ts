@@ -1,7 +1,9 @@
-import { existsSync } from 'node:fs'
+import { Buffer } from 'node:buffer'
+import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
+import { PassThrough, Readable } from 'node:stream'
 import { pathToFileURL } from 'node:url'
-import { FrameDecoder, ProtocolError, defaultMaxFrameBytes, encodeFrame, protocolVersion, type Frame } from './protocol.ts'
+import { FrameDecoder, ProtocolError, defaultMaxFrameBytes, encodeFrame, frameKinds, protocolVersion, type Frame } from './protocol.ts'
 
 type RecordValue = Record<string, unknown>
 type Disposer = () => unknown
@@ -33,13 +35,44 @@ type Registration = { dispose: Disposer; name?: string }
 type Incoming = { controller: AbortController; settled: boolean }
 type Outgoing = { resolve(value: unknown): void; reject(reason: unknown): void }
 
+type RouteKind = 'exact' | 'prefix'
+type Route = {
+  id: string
+  kind: RouteKind
+  path: string
+  owner?: string
+  handler(request: Readable, response: PassThrough): unknown
+  registered: boolean
+  removed: boolean
+  pending: Promise<unknown>
+}
+type PnpmOperation = {
+  stdout: PassThrough
+  stderr: PassThrough
+  stdoutBytes: number
+  stderrBytes: number
+}
+type Profile = { name: string; dir: string }
+type RemoteRequest = { requestId: bigint; promise: Promise<unknown> }
+
+const maxRouteRequestBytes = 2 * 1024 * 1024
+const maxRouteResponseBytes = 8 * 1024 * 1024
+const maxRouteHeaders = 128
+const maxRouteHeaderBytes = 32 * 1024
+const maxPnpmOutputChunkBytes = 64 * 1024
+const maxPnpmStdoutBytes = 256 * 1024
+const maxPnpmStderrBytes = 64 * 1024
+const maxNodeRequestId = BigInt(Number.MAX_SAFE_INTEGER - 1)
+const hopByHopHeaders = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'])
+const headerName = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+
 const fiberStates = ['PENDING', 'LOADING', 'ACTIVE', 'FAILED', 'DISPOSED', 'UNLOADING']
 const operationKinds = new Set([
   'plugin.load', 'plugin.update', 'plugin.dispose', 'plugin.snapshot',
   'service.call', 'service.provide', 'service.remove',
-  'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose',
+  'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose', 'web.route.request',
 ])
-const knownKinds = new Set(['hello', 'ready', 'response', 'error', 'cancel', 'exit', 'heartbeat', 'log', ...operationKinds])
+const knownKinds = new Set(frameKinds)
 const rawStdoutWrite = process.stdout.write.bind(process.stdout) as (chunk: Uint8Array) => boolean
 
 class BridgeError extends Error {
@@ -101,12 +134,87 @@ function failure(error: unknown) {
 }
 
 function maxFrameBytes() {
-  const raw = process.env.CORDIS_NODE_MAX_FRAME_BYTES
+  const raw = process.env.TESSIVUM_BRIDGE_MAX_FRAME_SIZE
   if (raw === undefined) return defaultMaxFrameBytes
-  if (!/^\d+$/.test(raw)) throw new BridgeError('INVALID_FRAME_LIMIT', 'CORDIS_NODE_MAX_FRAME_BYTES must be a positive integer')
+  if (!/^[1-9]\d*$/.test(raw)) throw new BridgeError('INVALID_FRAME_LIMIT', 'TESSIVUM_BRIDGE_MAX_FRAME_SIZE must be a positive decimal integer')
   const value = Number(raw)
-  if (!Number.isSafeInteger(value) || value < 1 || value > 0xffff_ffff) throw new BridgeError('INVALID_FRAME_LIMIT', 'CORDIS_NODE_MAX_FRAME_BYTES must be a positive u32')
+  if (!Number.isSafeInteger(value) || value > 12 * 1024 * 1024) throw new BridgeError('INVALID_FRAME_LIMIT', 'TESSIVUM_BRIDGE_MAX_FRAME_SIZE must not exceed 12 MiB')
   return value
+}
+
+function profileFromEnvironment(): Profile | undefined {
+  const name = process.env.TESSIVUM_PROFILE_NAME
+  const dir = process.env.TESSIVUM_PROFILE_DIR
+  if (name === undefined && dir === undefined) return undefined
+  if (name === undefined || dir === undefined) throw new BridgeError('INVALID_PROFILE', 'TESSIVUM_PROFILE_NAME and TESSIVUM_PROFILE_DIR must be set together')
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) throw new BridgeError('INVALID_PROFILE', 'TESSIVUM_PROFILE_NAME is invalid')
+  if (!isAbsolute(dir) || dir.includes('\0') || !existsSync(dir) || !statSync(dir).isDirectory()) throw new BridgeError('INVALID_PROFILE', 'TESSIVUM_PROFILE_DIR must name an existing absolute directory')
+  return { name, dir: resolve(dir) }
+}
+
+function routePath(value: unknown) {
+  const path = text(value, 'route path')
+  if (!path.startsWith('/') || path.includes('\0') || path.includes('?') || path.includes('#') || path.includes('\\')) throw new BridgeError('INVALID_ROUTE', 'route path is invalid')
+  let decoded: string
+  try {
+    decoded = decodeURIComponent(path)
+  } catch {
+    throw new BridgeError('INVALID_ROUTE', 'route path has invalid escapes')
+  }
+  if (decoded.split('/').some(segment => segment === '.' || segment === '..')) throw new BridgeError('INVALID_ROUTE', 'route path traversal is forbidden')
+  if (path !== '/dsh-market' && !path.startsWith('/dsh-market/')) throw new BridgeError('INVALID_ROUTE', 'route path must stay below /dsh-market')
+  return path
+}
+
+function frameBody(value: unknown, limit: number, label: string) {
+  if (typeof value !== 'string') throw new BridgeError('INVALID_PAYLOAD', `${label} must be base64 text`)
+  const source = value
+  if (source.length % 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(source)) throw new BridgeError('INVALID_PAYLOAD', `${label} is not canonical base64`)
+  const body = Buffer.from(source, 'base64')
+  if (body.byteLength > limit || body.toString('base64') !== source) throw new BridgeError('PAYLOAD_TOO_LARGE', `${label} exceeds ${limit} bytes`)
+  return body
+}
+
+function headers(value: unknown) {
+  if (!Array.isArray(value) || value.length > maxRouteHeaders) throw new BridgeError('INVALID_HEADERS', 'headers must contain at most 128 pairs')
+  let bytes = 0
+  return value.map((pair, index) => {
+    if (!Array.isArray(pair) || pair.length !== 2 || typeof pair[0] !== 'string' || typeof pair[1] !== 'string') throw new BridgeError('INVALID_HEADERS', `header ${index} must be a name/value pair`)
+    const [name, headerValue] = pair
+    const lower = name.toLowerCase()
+    if (!headerName.test(name) || /[\r\n]/.test(headerValue) || hopByHopHeaders.has(lower)) throw new BridgeError('INVALID_HEADERS', `header ${name} is invalid`)
+    bytes += Buffer.byteLength(name) + Buffer.byteLength(headerValue)
+    if (bytes > maxRouteHeaderBytes) throw new BridgeError('INVALID_HEADERS', 'headers exceed 32 KiB')
+    return [name, headerValue] as [string, string]
+  })
+}
+
+function responseOutput(stream: PassThrough, limit: number) {
+  const chunks: Buffer[] = []
+  let bytes = 0
+  let ended = false
+  const append = (chunk: unknown, encoding?: BufferEncoding) => {
+    if (ended) throw new BridgeError('LATE_RESPONSE', 'response already ended')
+    const body = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), encoding)
+    bytes += body.byteLength
+    if (bytes > limit) throw new BridgeError('PAYLOAD_TOO_LARGE', `response exceeds ${limit} bytes`)
+    chunks.push(body)
+  }
+  const end = stream.end.bind(stream)
+  stream.write = ((chunk: unknown, encoding?: BufferEncoding | (() => void), callback?: () => void) => {
+    append(chunk, typeof encoding === 'string' ? encoding : undefined)
+    if (typeof encoding === 'function') encoding()
+    callback?.()
+    return true
+  }) as typeof stream.write
+  stream.end = ((chunk?: unknown, encoding?: BufferEncoding | (() => void), callback?: () => void) => {
+    if (chunk !== undefined) append(chunk, typeof encoding === 'string' ? encoding : undefined)
+    ended = true
+    if (typeof encoding === 'function') encoding()
+    callback?.()
+    return end()
+  }) as typeof stream.end
+  return { body: () => Buffer.concat(chunks), ended: () => ended }
 }
 
 function vendorRoot() {
@@ -179,6 +287,7 @@ function configOf(payload: RecordValue) {
 export class CompatHost {
   private readonly maxFrameBytes = maxFrameBytes()
   private readonly vendor = vendorRoot()
+  private readonly profile = profileFromEnvironment()
   private generation = 0n
   private phase: 'new' | 'ready' | 'closing' | 'closed' = 'new'
   private root: Context | undefined
@@ -188,9 +297,18 @@ export class CompatHost {
   private readonly callbacks = new Map<string, (...args: unknown[]) => unknown>()
   private readonly incoming = new Map<string, Incoming>()
   private readonly outgoing = new Map<string, Outgoing>()
-  private nextRequestId = 1n
+  private nextRequestId = 2n
+  private readonly cancelledOutgoing = new Set<string>()
   private shutdownTask: Promise<void> | undefined
   private sequence = Promise.resolve()
+  private readonly routes = new Map<string, Route>()
+  private readonly routeTasks = new Set<Promise<unknown>>()
+  private routeFailure: unknown
+  private readonly pnpmOperations = new Map<string, PnpmOperation>()
+  private nextRouteId = 1n
+  private nextOperationId = 1n
+  private activeInvokes = 0
+  private loadingPlugin: string | undefined
 
   constructor() {
     installVendorResolver(this.vendor)
@@ -238,6 +356,134 @@ export class CompatHost {
     this.write('error', failure(error), frame.requestId)
   }
 
+  private trackRoute(task: Promise<unknown>) {
+    this.routeTasks.add(task)
+    void task.then(
+      () => this.routeTasks.delete(task),
+      error => {
+        this.routeTasks.delete(task)
+        this.routeFailure ??= error
+      },
+    )
+    return task
+  }
+
+  private registerRoute(value: unknown) {
+    const definition = object(value, 'route registration')
+    const kind = text(definition.kind, 'route kind')
+    if (kind !== 'exact' && kind !== 'prefix') throw new BridgeError('INVALID_ROUTE', 'route kind must be exact or prefix')
+    const path = routePath(definition.path)
+    if (typeof definition.handler !== 'function') throw new BridgeError('INVALID_ROUTE', 'route handler must be a function')
+    if ([...this.routes.values()].some(route => !route.removed && route.kind === kind && route.path === path)) throw new BridgeError('DUPLICATE_ROUTE', `route ${kind} ${path} already exists`)
+    const route: Route = {
+      id: `${this.generation}:route:${this.nextRouteId++}`,
+      kind,
+      path,
+      owner: this.loadingPlugin,
+      handler: definition.handler as Route['handler'],
+      registered: false,
+      removed: false,
+      pending: Promise.resolve(),
+    }
+    route.pending = this.trackRoute(this.requestRemote('web.route.register', { routeId: route.id, kind, path }).then(() => { route.registered = true }))
+    void route.pending.catch(() => undefined)
+    this.routes.set(route.id, route)
+    return () => this.removeRoute(route)
+  }
+
+  private removeRoute(route: Route) {
+    if (route.removed) return
+    route.removed = true
+    this.routes.delete(route.id)
+    if (this.phase !== 'ready') return
+    route.pending = this.trackRoute(route.pending.then(() => route.registered ? this.requestRemote('web.route.unregister', { routeId: route.id }) : undefined))
+    void route.pending.catch(() => undefined)
+  }
+
+  private async removeRoutes(owner?: string) {
+    for (const route of [...this.routes.values()]) if (owner === undefined || route.owner === owner) this.removeRoute(route)
+    await this.flushRoutes()
+  }
+
+  private async flushRoutes() {
+    const failure = this.routeFailure
+    this.routeFailure = undefined
+    if (failure !== undefined) throw failure
+    await Promise.all([...this.routeTasks])
+    if (this.routeFailure !== undefined) {
+      const error = this.routeFailure
+      this.routeFailure = undefined
+      throw error
+    }
+  }
+
+  private installCompatibilityServices() {
+    this.context().provide('webServer', { register: (definition: unknown) => this.registerRoute(definition) })
+    if (!this.profile) return
+    this.context().provide('desktopProfiles', { current: { name: this.profile.name, dir: this.profile.dir } })
+    this.context().provide('desktopPnpm', { runPlugin: (args: unknown, invokingDir: unknown, signal?: AbortSignal) => this.runPlugin(args, invokingDir, signal) })
+  }
+
+  private async invokeRoute(payload: RecordValue, signal: AbortSignal) {
+    const route = this.routes.get(text(payload.routeId, 'routeId'))
+    if (!route || route.removed || !route.registered) throw new BridgeError('UNKNOWN_ROUTE', 'route is no longer active')
+    const method = text(payload.method, 'method')
+    if (!headerName.test(method)) throw new BridgeError('INVALID_ROUTE_REQUEST', 'method is invalid')
+    const path = routePath(payload.path)
+    const query = payload.query === undefined || payload.query === null ? '' : text(payload.query, 'query')
+    if (query.includes('\0') || query.includes('#')) throw new BridgeError('INVALID_ROUTE_REQUEST', 'query is invalid')
+    const requestHeaders = headers(payload.headers)
+    const body = frameBody(payload.bodyBase64, maxRouteRequestBytes, 'bodyBase64')
+    abortIfNeeded(signal)
+    const request = Readable.from(body) as Readable & RecordValue
+    request.method = method
+    request.url = query ? `${path}?${query}` : path
+    request.httpVersion = '1.1'
+    request.rawHeaders = requestHeaders.flat()
+    request.headers = requestHeaders.reduce<Record<string, string>>((all, [name, value]) => {
+      const key = name.toLowerCase()
+      all[key] = all[key] === undefined ? value : `${all[key]}, ${value}`
+      return all
+    }, {})
+    const response = new PassThrough() as PassThrough & RecordValue
+    let statusCode = 200
+    const output = responseOutput(response, maxRouteResponseBytes)
+    Object.defineProperty(response, 'statusCode', {
+      enumerable: true,
+      get: () => statusCode,
+      set: (value: unknown) => {
+        if (output.ended()) throw new BridgeError('LATE_RESPONSE', 'response already ended')
+        statusCode = value as number
+      },
+    })
+    const responseHeaders = new Map<string, [string, string]>()
+    response.setHeader = (name: string, value: unknown) => {
+      if (output.ended()) throw new BridgeError('LATE_RESPONSE', 'response already ended')
+      const pair = headers([[name, Array.isArray(value) ? value.map(String).join(', ') : String(value)]])[0]!
+      responseHeaders.set(pair[0].toLowerCase(), pair)
+      return response
+    }
+    response.getHeader = (name: string) => responseHeaders.get(name.toLowerCase())?.[1]
+    response.getHeaderNames = () => [...responseHeaders.keys()]
+    response.hasHeader = (name: string) => responseHeaders.has(name.toLowerCase())
+    response.removeHeader = (name: string) => {
+      if (output.ended()) throw new BridgeError('LATE_RESPONSE', 'response already ended')
+      responseHeaders.delete(name.toLowerCase())
+    }
+    response.writeHead = (status: number, statusOrHeaders?: string | Record<string, unknown>, maybeHeaders?: Record<string, unknown>) => {
+      if (output.ended()) throw new BridgeError('LATE_RESPONSE', 'response already ended')
+      response.statusCode = status
+      const values = typeof statusOrHeaders === 'object' ? statusOrHeaders : maybeHeaders
+      if (values) for (const [name, value] of Object.entries(values)) response.setHeader(name, value)
+      return response
+    }
+    await settled(route.handler(request, response))
+    abortIfNeeded(signal)
+    if (!output.ended()) throw new BridgeError('INCOMPLETE_RESPONSE', 'route handler returned without ending its response')
+    if (!Number.isInteger(response.statusCode) || response.statusCode < 100 || response.statusCode > 599) throw new BridgeError('INVALID_RESPONSE', 'response status is invalid')
+    return { status: response.statusCode, headers: [...responseHeaders.values()], bodyBase64: output.body().toString('base64') }
+  }
+
   private async initialize() {
     if (this.root) return
     // The vendor root is selected at runtime, so these module URLs cannot be static imports.
@@ -254,10 +500,45 @@ export class CompatHost {
       }),
     })
     this.loader = new loaderModule.Loader(this.root, { baseUrl: this.root.baseUrl })
+    this.installCompatibilityServices()
+  }
+
+  private dispatchInvoke(frame: Frame) {
+    if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'route invoke belongs to another connection generation'))
+    if (frame.requestId === undefined || frame.requestId === 0n) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'web.route.request requires nonzero requestId'))
+    const key = frame.requestId.toString()
+    if (this.incoming.has(key)) return this.fault(frame, new BridgeError('DUPLICATE_REQUEST_ID', `request ${key} is already active`))
+    if (this.activeInvokes >= 64) {
+      this.respondError(frame, new BridgeError('QUEUE_FULL', 'too many active route invocations'))
+      return
+    }
+    const request: Incoming = { controller: new AbortController(), settled: false }
+    this.incoming.set(key, request)
+    this.activeInvokes++
+    void (async () => {
+      try {
+        const value = await this.invokeRoute(object(frame.payload), request.controller.signal)
+        abortIfNeeded(request.controller.signal)
+        if (!request.settled) {
+          this.respond(frame, value)
+          request.settled = true
+        }
+      } catch (error) {
+        if (!request.settled) {
+          this.respondError(frame, error)
+          request.settled = true
+        }
+      } finally {
+        if (this.incoming.get(key) === request) this.incoming.delete(key)
+        this.activeInvokes--
+      }
+    })().catch(error => this.fatal(error))
   }
 
   receive(frame: Frame) {
     if (frame.kind === 'cancel') return this.cancel(frame)
+    if (frame.kind === 'pnpm.output') return this.output(frame)
+    if (frame.kind === 'web.route.request') return this.dispatchInvoke(frame)
     this.sequence = this.sequence.then(() => this.dispatch(frame)).catch(error => this.fatal(error))
     return undefined
   }
@@ -270,7 +551,7 @@ export class CompatHost {
       this.generation = frame.connectionGeneration
       await this.initialize()
       this.phase = 'ready'
-      this.write('ready', { protocolVersion, maxFrameBytes: this.maxFrameBytes, vendoredCordis: true })
+      this.write('ready', { protocolVersion, maxFrameBytes: this.maxFrameBytes, vendoredCordis: true, capabilities: ['web.route/v1'] })
       return
     }
     if (frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'frame belongs to another connection generation'))
@@ -294,6 +575,11 @@ export class CompatHost {
       process.stdin.pause()
       process.exitCode = 0
       queueMicrotask(() => process.exit())
+      return
+    }
+    if (frame.kind === 'pnpm.output') {
+      if (frame.requestId !== undefined) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'pnpm.output must not carry requestId'))
+      this.pnpmOutput(object(frame.payload))
       return
     }
     if (!operationKinds.has(frame.kind)) return this.fault(frame, new BridgeError('UNKNOWN_KIND', `unknown message kind ${frame.kind}`))
@@ -323,9 +609,13 @@ export class CompatHost {
 
   private resolveOutgoing(frame: Frame) {
     if (frame.requestId === undefined) throw new BridgeError('INVALID_REQUEST_ID', `${frame.kind} requires requestId`)
-    const request = this.outgoing.get(frame.requestId.toString())
-    if (!request) throw new BridgeError('UNKNOWN_REQUEST_ID', `unknown outgoing request ${frame.requestId}`)
-    this.outgoing.delete(frame.requestId.toString())
+    const key = frame.requestId.toString()
+    const request = this.outgoing.get(key)
+    if (!request) {
+      if (this.cancelledOutgoing.delete(key)) return
+      throw new BridgeError('UNKNOWN_REQUEST_ID', `unknown outgoing request ${frame.requestId}`)
+    }
+    this.outgoing.delete(key)
     if (frame.kind === 'response') request.resolve(frame.payload)
     else request.reject(Object.assign(new BridgeError('REMOTE_ERROR', 'remote callback failed'), { details: frame.payload }))
   }
@@ -345,8 +635,15 @@ export class CompatHost {
     const outgoing = this.outgoing.get(key)
     if (outgoing) {
       this.outgoing.delete(key)
+      this.cancelledOutgoing.add(key)
       outgoing.reject(new BridgeError('CANCELLED', 'remote request cancelled'))
     }
+  }
+
+  private output(frame: Frame) {
+    if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'pnpm output belongs to another connection generation'))
+    if (frame.requestId !== undefined) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'pnpm.output must not carry requestId'))
+    this.pnpmOutput(object(frame.payload))
   }
 
   private async operation(frame: Frame, signal: AbortSignal): Promise<unknown> {
@@ -362,6 +659,7 @@ export class CompatHost {
       case 'event.emit': return this.emit(object(frame.payload), signal)
       case 'event.callback': return this.callback(object(frame.payload), signal)
       case 'registration.dispose': return this.disposeRegistration(object(frame.payload), signal)
+      case 'web.route.request': return this.invokeRoute(object(frame.payload), signal)
       default: throw new BridgeError('UNKNOWN_KIND', `unknown message kind ${frame.kind}`)
     }
   }
@@ -383,6 +681,9 @@ export class CompatHost {
     const config = configOf(payload)
     const entry = payload.entry === undefined ? undefined : object(payload.entry, 'entry')
     const useLoader = payload.loader === true || entry?.loader === true
+    this.loadingPlugin = id
+    try {
+    try {
     if (useLoader) {
       const loader = this.loader
       if (!loader) throw new BridgeError('LOADER_UNAVAILABLE', 'loader is unavailable')
@@ -416,7 +717,18 @@ export class CompatHost {
       }
       this.plugins.set(id, { fiber })
     }
+    } finally {
+      this.loadingPlugin = undefined
+    }
+    await this.flushRoutes()
     return this.snapshot(id)
+    } catch (error) {
+      const active = this.plugins.get(id)
+      if (active) await settled(active.entry ? this.loader!.remove(id) : active.fiber.dispose()).catch(() => undefined)
+      this.plugins.delete(id)
+      await this.removeRoutes(id).catch(() => undefined)
+      throw error
+    }
   }
 
   private plugin(payload: RecordValue) {
@@ -442,6 +754,7 @@ export class CompatHost {
     const [id, plugin] = this.plugin(payload)
     if (plugin.entry) await this.loader!.remove(id)
     else await plugin.fiber.dispose()
+    await this.removeRoutes(id)
     this.plugins.delete(id)
     abortIfNeeded(signal)
     return { pluginId: id, disposed: true }
@@ -571,10 +884,70 @@ export class CompatHost {
     return { registrationId: id, disposed: true }
   }
 
-  private requestRemote(kind: string, payload: unknown) {
-    if (this.phase !== 'ready') return Promise.reject(new BridgeError('HOST_CLOSING', 'host is not ready'))
-    const requestId = this.nextRequestId++
-    return new Promise<unknown>((resolve, reject) => {
+  private pnpmOutput(payload: RecordValue) {
+    const operationId = text(payload.operationId, 'operationId')
+    const operation = this.pnpmOperations.get(operationId)
+    if (!operation) throw new BridgeError('UNKNOWN_PNPM_OPERATION', 'pnpm output arrived after completion')
+    const stream = text(payload.stream, 'stream')
+    if (stream !== 'stdout' && stream !== 'stderr') throw new BridgeError('INVALID_PNPM_OUTPUT', 'stream must be stdout or stderr')
+    const chunk = frameBody(payload.chunkBase64, maxPnpmOutputChunkBytes, 'chunkBase64')
+    const bytes = stream === 'stdout' ? operation.stdoutBytes : operation.stderrBytes
+    const limit = stream === 'stdout' ? maxPnpmStdoutBytes : maxPnpmStderrBytes
+    if (bytes + chunk.byteLength > limit) throw new BridgeError('PAYLOAD_TOO_LARGE', `${stream} exceeds ${limit} bytes`)
+    if (stream === 'stdout') {
+      operation.stdoutBytes += chunk.byteLength
+      operation.stdout.write(chunk)
+    } else {
+      operation.stderrBytes += chunk.byteLength
+      operation.stderr.write(chunk)
+    }
+  }
+
+  private runPlugin(args: unknown, invokingDir: unknown, signal?: AbortSignal) {
+    if (!this.profile) throw new BridgeError('PROFILE_UNAVAILABLE', 'desktopPnpm requires a configured profile')
+    if (!Array.isArray(args) || !args.length || args.some(arg => typeof arg !== 'string' || !arg || arg.includes('\0'))) throw new BridgeError('INVALID_PNPM_ARGS', 'pnpm args must be non-empty text')
+    const directory = text(invokingDir, 'invokingDir')
+    if (!isAbsolute(directory) || directory.includes('\0')) throw new BridgeError('INVALID_PNPM_DIR', 'invokingDir must be absolute')
+    const operationId = `${this.generation}:pnpm:${this.nextOperationId++}`
+    const operation: PnpmOperation = {
+      stdout: new PassThrough({ highWaterMark: maxPnpmStdoutBytes }),
+      stderr: new PassThrough({ highWaterMark: maxPnpmStderrBytes }),
+      stdoutBytes: 0,
+      stderrBytes: 0,
+    }
+    this.pnpmOperations.set(operationId, operation)
+    const remote = this.beginRemote('pnpm.run', { operationId, args, invokingDir: directory })
+    let abort: (() => void) | undefined
+    const finish = () => {
+      if (abort) signal?.removeEventListener('abort', abort)
+      operation.stdout.end()
+      operation.stderr.end()
+      this.pnpmOperations.delete(operationId)
+    }
+    const done = remote.promise.then(value => {
+      const result = object(value, 'pnpm result')
+      if (!Number.isInteger(result.exitCode) || (result.signal !== undefined && result.signal !== null && typeof result.signal !== 'string')) throw new BridgeError('INVALID_PNPM_RESULT', 'pnpm result is invalid')
+      finish()
+      return { exitCode: result.exitCode, signal: result.signal ?? null }
+    }, error => {
+      finish()
+      throw error
+    })
+    const cancel = () => this.cancelRemote(remote.requestId)
+    if (signal) {
+      abort = cancel
+      signal.addEventListener('abort', abort, { once: true })
+      if (signal.aborted) cancel()
+    }
+    return { stdout: operation.stdout, stderr: operation.stderr, done, cancel }
+  }
+
+  private beginRemote(kind: string, payload: unknown): RemoteRequest {
+    if (this.phase !== 'ready') return { requestId: 0n, promise: Promise.reject(new BridgeError('HOST_CLOSING', 'host is not ready')) }
+    if (this.nextRequestId > maxNodeRequestId) return { requestId: 0n, promise: Promise.reject(new BridgeError('REQUEST_IDS_EXHAUSTED', 'bridge request ids are exhausted')) }
+    const requestId = this.nextRequestId
+    this.nextRequestId += 2n
+    const promise = new Promise<unknown>((resolve, reject) => {
       this.outgoing.set(requestId.toString(), { resolve, reject })
       try {
         this.write(kind, payload, requestId)
@@ -583,6 +956,25 @@ export class CompatHost {
         reject(error)
       }
     })
+    return { requestId, promise }
+  }
+
+  private cancelRemote(requestId: bigint) {
+    const pending = this.outgoing.get(requestId.toString())
+    if (!pending) return false
+    this.outgoing.delete(requestId.toString())
+    this.cancelledOutgoing.add(requestId.toString())
+    pending.reject(new BridgeError('CANCELLED', 'remote request cancelled'))
+    try {
+      this.write('cancel', { requestId }, requestId)
+    } catch {
+      // The local terminal result still wins when the peer is gone.
+    }
+    return true
+  }
+
+  private requestRemote(kind: string, payload: unknown) {
+    return this.beginRemote(kind, payload).promise
   }
 
   private async shutdown() {
@@ -592,6 +984,13 @@ export class CompatHost {
       for (const request of this.incoming.values()) request.controller.abort()
       for (const request of this.outgoing.values()) request.reject(new BridgeError('HOST_CLOSING', 'host is shutting down'))
       this.outgoing.clear()
+      this.cancelledOutgoing.clear()
+      this.routes.clear()
+      for (const operation of this.pnpmOperations.values()) {
+        operation.stdout.end()
+        operation.stderr.end()
+      }
+      this.pnpmOperations.clear()
       const disposals = [
         ...[...this.plugins.entries()].map(([id, plugin]) => plugin.entry ? this.loader!.remove(id) : plugin.fiber.dispose()),
         ...[...this.registrations.values()].map(registration => settled(registration.dispose())),

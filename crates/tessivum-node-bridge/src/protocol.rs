@@ -55,6 +55,16 @@ pub enum FrameKind {
     EventCallback,
     #[serde(rename = "registration.dispose")]
     RegistrationDispose,
+    #[serde(rename = "web.route.register")]
+    WebRouteRegister,
+    #[serde(rename = "web.route.unregister")]
+    WebRouteRemove,
+    #[serde(rename = "web.route.request")]
+    WebRouteInvoke,
+    #[serde(rename = "pnpm.run")]
+    PnpmRun,
+    #[serde(rename = "pnpm.output")]
+    PnpmOutput,
 }
 
 impl FrameKind {
@@ -73,6 +83,10 @@ impl FrameKind {
                 | Self::EventEmit
                 | Self::EventCallback
                 | Self::RegistrationDispose
+                | Self::WebRouteRegister
+                | Self::WebRouteRemove
+                | Self::WebRouteInvoke
+                | Self::PnpmRun
         )
     }
 
@@ -246,6 +260,11 @@ impl FrameKind {
             Self::EventEmit => "event.emit",
             Self::EventCallback => "event.callback",
             Self::RegistrationDispose => "registration.dispose",
+            Self::WebRouteRegister => "web.route.register",
+            Self::WebRouteRemove => "web.route.unregister",
+            Self::WebRouteInvoke => "web.route.request",
+            Self::PnpmRun => "pnpm.run",
+            Self::PnpmOutput => "pnpm.output",
         }
     }
 }

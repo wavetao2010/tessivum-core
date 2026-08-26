@@ -121,3 +121,34 @@ fn frames_require_the_negotiated_version_generation_and_request_correlation_shap
         Err(BridgeError::InvalidFrame(message)) if message.contains("hello")
     ));
 }
+
+#[test]
+fn frozen_extension_kinds_serialize_exactly_as_protocol_names() {
+    let codec = FrameCodec::default();
+    for (kind, name) in [
+        (FrameKind::WebRouteRegister, "web.route.register"),
+        (FrameKind::WebRouteRemove, "web.route.unregister"),
+        (FrameKind::WebRouteInvoke, "web.route.request"),
+        (FrameKind::PnpmRun, "pnpm.run"),
+    ] {
+        assert!(kind.is_request());
+        assert_eq!(kind.as_str(), name);
+        let frame = Frame::request(7, 11, kind, json!({}));
+        let encoded = codec.encode(&frame).expect("extension request encodes");
+        let wire: serde_json::Value = serde_json::from_slice(&encoded[4..]).expect("wire is JSON");
+        assert_eq!(wire["kind"], name);
+        assert_eq!(codec.decode(&encoded).expect("extension request decodes"), frame);
+    }
+}
+
+#[test]
+fn pnpm_output_is_an_uncorrelated_notification() {
+    let codec = FrameCodec::default();
+    let frame = Frame::new(7, FrameKind::PnpmOutput, json!({ "operationId": "op", "stream": "stdout", "chunkBase64": "" }));
+    assert!(!frame.kind.is_request());
+    let encoded = codec.encode(&frame).expect("notification encodes");
+    let wire: serde_json::Value = serde_json::from_slice(&encoded[4..]).expect("wire is JSON");
+    assert_eq!(wire["kind"], "pnpm.output");
+    assert!(wire.get("requestId").is_none());
+    assert_eq!(codec.decode(&encoded).expect("notification decodes"), frame);
+}

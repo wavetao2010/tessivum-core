@@ -4,6 +4,32 @@ export const protocolVersion = 'cordis.node/v1' as const
 export const defaultMaxFrameBytes = 1024 * 1024
 const maxU64 = (1n << 64n) - 1n
 
+export const frameKinds = [
+  'hello', 'ready', 'response', 'error', 'cancel', 'heartbeat', 'exit', 'log',
+  'plugin.load', 'plugin.update', 'plugin.dispose', 'plugin.snapshot',
+  'service.call', 'service.provide', 'service.remove',
+  'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose',
+  'web.route.register', 'web.route.unregister', 'web.route.request', 'pnpm.run', 'pnpm.output',
+] as const
+
+export type FrameKind = typeof frameKinds[number]
+
+const frameKindSet = new Set<string>(frameKinds)
+const requestKindSet = new Set<string>([
+  'exit', 'plugin.load', 'plugin.update', 'plugin.dispose', 'plugin.snapshot',
+  'service.call', 'service.provide', 'service.remove',
+  'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose',
+  'web.route.register', 'web.route.unregister', 'web.route.request', 'pnpm.run',
+])
+
+export function isRequestKind(kind: string): kind is FrameKind {
+  return requestKindSet.has(kind)
+}
+
+function requiresRequestId(kind: string) {
+  return isRequestKind(kind) || kind === 'response' || kind === 'error' || kind === 'cancel'
+}
+
 export interface Frame {
   protocolVersion: typeof protocolVersion
   connectionGeneration: bigint
@@ -112,18 +138,23 @@ export function parseFrame(source: string): Frame {
   const allowed = new Set(['protocolVersion', 'connectionGeneration', 'kind', 'requestId', 'payload'])
   if (Object.keys(raw).some(key => !allowed.has(key))) throw new ProtocolError('INVALID_FRAME', 'frame contains an unknown field')
   if (raw.protocolVersion !== protocolVersion) throw new ProtocolError('PROTOCOL_VERSION', `expected ${protocolVersion}`)
-  if (typeof raw.kind !== 'string' || !raw.kind) throw new ProtocolError('INVALID_FRAME', 'kind must be a non-empty string')
+  if (typeof raw.kind !== 'string' || !frameKindSet.has(raw.kind)) throw new ProtocolError('INVALID_FRAME', 'kind must name a known frame operation')
   if (!Object.hasOwn(raw, 'payload')) throw new ProtocolError('INVALID_FRAME', 'missing payload')
   const generation = u64(rootInteger(source, 'connectionGeneration'), 'connectionGeneration', true)!
+  if (generation === 0n) throw new ProtocolError('INVALID_FRAME', 'connectionGeneration must be greater than zero')
   const requestId = u64(rootInteger(source, 'requestId'), 'requestId', false)
   if (Object.hasOwn(raw, 'requestId') && requestId === undefined) throw new ProtocolError('INVALID_FRAME', 'invalid requestId')
+  if (requiresRequestId(raw.kind) && requestId === undefined) throw new ProtocolError('INVALID_FRAME', `${raw.kind} requires requestId`)
+  if (!requiresRequestId(raw.kind) && requestId !== undefined) throw new ProtocolError('INVALID_FRAME', `${raw.kind} must not carry requestId`)
+  if (requestId === 0n) throw new ProtocolError('INVALID_FRAME', 'requestId must be greater than zero')
   return { protocolVersion, connectionGeneration: generation, kind: raw.kind, ...(requestId === undefined ? {} : { requestId }), payload: raw.payload }
 }
 
 function json(frame: Frame) {
-  if (frame.protocolVersion !== protocolVersion) throw new ProtocolError('PROTOCOL_VERSION', `expected ${protocolVersion}`)
-  if (!frame.kind) throw new ProtocolError('INVALID_FRAME', 'kind must be non-empty')
-  if (frame.connectionGeneration < 0n || frame.connectionGeneration > maxU64) throw new ProtocolError('INVALID_FRAME', 'connectionGeneration exceeds u64')
+  if (!frameKindSet.has(frame.kind)) throw new ProtocolError('INVALID_FRAME', 'kind must name a known frame operation')
+  if (frame.connectionGeneration <= 0n || frame.connectionGeneration > maxU64) throw new ProtocolError('INVALID_FRAME', 'connectionGeneration must be a nonzero u64')
+  if (requiresRequestId(frame.kind) && frame.requestId === undefined) throw new ProtocolError('INVALID_FRAME', `${frame.kind} requires requestId`)
+  if (!requiresRequestId(frame.kind) && frame.requestId !== undefined) throw new ProtocolError('INVALID_FRAME', `${frame.kind} must not carry requestId`)
   if (frame.requestId !== undefined && (frame.requestId <= 0n || frame.requestId > maxU64)) throw new ProtocolError('INVALID_FRAME', 'requestId must be a nonzero u64')
   let payload: string | undefined
   try {

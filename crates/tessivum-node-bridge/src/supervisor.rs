@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     io::{Read, Write},
     panic::{catch_unwind, AssertUnwindSafe},
@@ -26,6 +26,7 @@ use tessivum_core::{
 use crate::protocol::{BridgeError, BridgeResult, Frame, FrameCodec, FrameKind, RemoteError};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_BRIDGE_REQUEST_ID: u64 = 9_007_199_254_740_991;
 
 const MAX_STARTUP_STDERR_BYTES: usize = 4 * 1024;
 
@@ -201,7 +202,20 @@ struct ClientInner {
     handler: Mutex<Option<Arc<dyn BridgeHandler>>>,
     on_disconnect: Mutex<Option<DisconnectHandler>>,
     on_log: Mutex<Option<LogHandler>>,
+    extensions: Mutex<BTreeSet<String>>,
     last_heartbeat: Mutex<Instant>,
+    pnpm_runs: Arc<Mutex<BTreeMap<u64, bool>>>,
+}
+
+struct PnpmRunPermit {
+    active: Arc<Mutex<BTreeMap<u64, bool>>>,
+    request_id: u64,
+}
+
+impl Drop for PnpmRunPermit {
+    fn drop(&mut self) {
+        lock(&self.active).remove(&self.request_id);
+    }
 }
 
 impl ClientInner {
@@ -245,13 +259,26 @@ impl ClientInner {
             handler(error);
         }
     }
-
-    fn mark_ready(&self) {
+    fn mark_ready(&self, payload: Value) -> BridgeResult<()> {
+        let capabilities = match payload {
+            Value::Object(payload) => match payload.get("capabilities") {
+                None => BTreeSet::new(),
+                Some(Value::Array(values)) => values
+                    .iter()
+                    .map(|value| value.as_str().map(str::to_owned))
+                    .collect::<Option<BTreeSet<_>>>()
+                    .ok_or_else(|| BridgeError::Handshake("ready capabilities must be strings".into()))?,
+                Some(_) => return Err(BridgeError::Handshake("ready capabilities must be an array".into())),
+            },
+            _ => return Err(BridgeError::Handshake("ready payload must be an object".into())),
+        };
         let mut state = lock(&self.state);
         if matches!(&*state, ConnectionState::Handshaking) {
+            *lock(&self.extensions) = capabilities;
             *state = ConnectionState::Ready;
             self.state_changed.notify_all();
         }
+        Ok(())
     }
 
     fn resolve_pending(&self, request_id: u64, result: BridgeResult<Value>) -> bool {
@@ -264,7 +291,40 @@ impl ClientInner {
         }
     }
 
-    fn dispatch(&self, frame: Frame) {
+    fn acquire_pnpm_run(&self, request_id: u64) -> Option<PnpmRunPermit> {
+        let mut active = lock(&self.pnpm_runs);
+        if active.len() >= self.config.queue_capacity {
+            return None;
+        }
+        active.insert(request_id, false);
+        Some(PnpmRunPermit {
+            active: Arc::clone(&self.pnpm_runs),
+            request_id,
+        })
+    }
+
+    fn cancel_pnpm_run(&self, frame: Frame) {
+        let request_id = frame.request_id.expect("validated request id");
+        let should_dispatch = lock(&self.pnpm_runs)
+            .get_mut(&request_id)
+            .is_some_and(|cancelled| {
+                if *cancelled {
+                    false
+                } else {
+                    *cancelled = true;
+                    true
+                }
+            });
+        if !should_dispatch {
+            return;
+        }
+        if let Some(handler) = lock(&self.handler).clone() {
+            thread::spawn(move || {
+                let _ = handler.handle(frame);
+            });
+        }
+    }
+    fn dispatch(self: &Arc<Self>, frame: Frame) {
         let state = lock(&self.state);
         let handshaking = matches!(&*state, ConnectionState::Handshaking);
         let disconnected = matches!(&*state, ConnectionState::Disconnected(_));
@@ -287,7 +347,11 @@ impl ClientInner {
             return;
         }
         match frame.kind {
-            FrameKind::Ready => self.mark_ready(),
+            FrameKind::Ready => {
+                if let Err(error) = self.mark_ready(frame.payload) {
+                    self.disconnect(error);
+                }
+            }
             FrameKind::Heartbeat => *lock(&self.last_heartbeat) = Instant::now(),
             FrameKind::Log => {
                 if let Some(handler) = lock(&self.on_log).clone() {
@@ -309,16 +373,18 @@ impl ClientInner {
                 );
             }
             FrameKind::Cancel => {
-                self.resolve_pending(
+                if !self.resolve_pending(
                     frame.request_id.expect("validated request id"),
                     Err(BridgeError::Cancelled),
-                );
+                ) {
+                    self.cancel_pnpm_run(frame);
+                }
             }
             _ => self.dispatch_request(frame),
         }
     }
 
-    fn dispatch_request(&self, frame: Frame) {
+    fn dispatch_request(self: &Arc<Self>, frame: Frame) {
         if !matches!(&*lock(&self.state), ConnectionState::Ready) {
             self.disconnect(BridgeError::Handshake(format!(
                 "received {} before ready",
@@ -326,7 +392,23 @@ impl ClientInner {
             )));
             return;
         }
-        let request_id = frame.request_id.expect("validated request id");
+        if frame.kind == FrameKind::PnpmRun {
+            let request_id = frame.request_id.expect("validated request id");
+            let Some(permit) = self.acquire_pnpm_run(request_id) else {
+                self.respond_request(frame, Err(BridgeError::QueueFull));
+                return;
+            };
+            let inner = Arc::clone(self);
+            thread::spawn(move || {
+                let _permit = permit;
+                inner.dispatch_request_serial(frame);
+            });
+            return;
+        }
+        self.dispatch_request_serial(frame);
+    }
+
+    fn dispatch_request_serial(&self, frame: Frame) {
         let result = lock(&self.handler)
             .clone()
             .ok_or_else(|| {
@@ -335,7 +417,12 @@ impl ClientInner {
                     format!("no Rust handler is registered for {}", frame.kind.as_str()),
                 ))
             })
-            .and_then(|handler| handler.handle(frame));
+            .and_then(|handler| handler.handle(frame.clone()));
+        self.respond_request(frame, result);
+    }
+
+    fn respond_request(&self, frame: Frame, result: BridgeResult<Value>) {
+        let request_id = frame.request_id.expect("validated request id");
         let response = match result {
             Ok(payload) => Frame::response(self.generation, request_id, payload),
             Err(BridgeError::Remote(error)) => Frame::error(self.generation, request_id, error),
@@ -347,7 +434,7 @@ impl ClientInner {
         };
         let _ = self.send(response);
     }
-}
+ }
 
 /// A bounded, generation-checked connection to a single Node compat host.
 #[derive(Clone)]
@@ -397,6 +484,8 @@ impl BridgeClient {
             on_disconnect: Mutex::new(None),
             on_log: Mutex::new(None),
             last_heartbeat: Mutex::new(Instant::now()),
+            extensions: Mutex::new(BTreeSet::new()),
+            pnpm_runs: Arc::new(Mutex::new(BTreeMap::new())),
         });
         spawn_writer(Arc::clone(&inner), codec.clone(), writer, outgoing_rx);
         spawn_reader(Arc::clone(&inner), codec, reader, incoming_tx);
@@ -441,6 +530,10 @@ impl BridgeClient {
         }
     }
 
+    pub fn supports_extension(&self, extension: &str) -> bool {
+        lock(&self.inner.extensions).contains(extension)
+    }
+
     /// Sends `hello` and waits for a matching `ready`; no plugin request is
     /// admitted until this returns successfully.
     pub fn handshake(&self, timeout: Duration) -> BridgeResult<()> {
@@ -479,6 +572,18 @@ impl BridgeClient {
         }
     }
 
+    /// Emits one bounded, uncorrelated peer notification while ready.
+    pub fn notify(&self, kind: FrameKind, payload: Value) -> BridgeResult<()> {
+        if kind.is_request() || matches!(kind, FrameKind::Response | FrameKind::Error | FrameKind::Cancel) {
+            return Err(BridgeError::InvalidFrame(format!(
+                "{} is not a notification operation",
+                kind.as_str()
+            )));
+        }
+        self.require_ready()?;
+        self.inner.send(Frame::new(self.generation(), kind, payload))
+    }
+
     pub fn heartbeat(&self) -> BridgeResult<()> {
         self.require_ready()?;
         self.inner.send(Frame::new(
@@ -500,7 +605,9 @@ impl BridgeClient {
             .inner
             .next_request_id
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
-                value.checked_add(1)
+                value
+                    .checked_add(2)
+                    .filter(|next| *next <= MAX_BRIDGE_REQUEST_ID)
             })
             .map_err(|_| BridgeError::InvalidFrame("bridge request ids exhausted".into()))?;
         let (reply, receiver) = mpsc::channel();
