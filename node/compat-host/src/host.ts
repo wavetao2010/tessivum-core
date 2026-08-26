@@ -332,12 +332,12 @@ export class CompatHost {
   }
 
   private write(kind: string, payload: unknown, requestId?: bigint) {
-    rawStdoutWrite(encodeFrame({ protocolVersion, connectionGeneration: this.generation, kind, ...(requestId === undefined ? {} : { requestId }), payload: json(payload) }, this.maxFrameBytes))
+    rawStdoutWrite(encodeFrame({ protocolVersion, connectionGeneration: this.generation, kind, ...(requestId === undefined ? {} : { requestId }), payload }, this.maxFrameBytes))
   }
 
   private log(payload: unknown) {
     try {
-      this.write('log', payload)
+      this.write('log', json(payload))
     } catch {
       // Nothing safe remains if even a bounded log frame cannot be serialized.
     }
@@ -961,7 +961,7 @@ export class CompatHost {
     const promise = new Promise<unknown>((resolve, reject) => {
       this.outgoing.set(requestId.toString(), { resolve, reject })
       try {
-        this.write(kind, payload, requestId)
+        this.write(kind, json(payload), requestId)
       } catch (error) {
         this.outgoing.delete(requestId.toString())
         reject(error)
