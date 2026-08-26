@@ -47,6 +47,7 @@ test('route invoke adapts a bounded request and completed response', async () =>
     handler: (request: any, response: any) => {
       assert.equal(request.method, 'POST')
       assert.equal(request.url, '/dsh-market/test?a=1')
+      assert.equal(request.socket.remoteAddress, '127.0.0.1')
       response.writeHead(201, { 'x-result': 'yes' })
       response.end('ok')
     },
@@ -63,6 +64,7 @@ test('pnpm output streams before completion and cancel is correlated', async () 
   assert.equal(handle.stdout.read().toString(), 'ok')
   assert.equal(handle.cancel(), true)
   await assert.rejects(handle.done)
+  assert.doesNotThrow(() => value.output({ protocolVersion, connectionGeneration: 5n, kind: 'pnpm.output', payload: { operationId: '5:pnpm:1', stream: 'stdout', chunkBase64: 'b2s=' } } as Frame))
   assert.deepEqual(frames, [['pnpm.run', 2n], ['cancel', 2n]])
 })
 
@@ -113,4 +115,11 @@ test('a nested pnpm run cancels on a concurrent route request', async () => {
   assert.deepEqual(frames, [['pnpm.run', 2n], ['cancel', 2n]])
   assert.deepEqual(responses, [3n])
   assert.deepEqual(errors, [1n])
+})
+
+test('pnpm completion permits a signal-only exit', async () => {
+  const value = host()
+  const handle = value.runPlugin(['install', '--ignore-scripts'], process.cwd())
+  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 2n, payload: { exitCode: null, signal: 'SIGTERM' } } as Frame)
+  assert.deepEqual(await handle.done, { exitCode: null, signal: 'SIGTERM' })
 })

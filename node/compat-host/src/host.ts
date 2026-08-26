@@ -440,6 +440,7 @@ export class CompatHost {
     request.url = query ? `${path}?${query}` : path
     request.httpVersion = '1.1'
     request.rawHeaders = requestHeaders.flat()
+    Object.defineProperty(request, 'socket', { enumerable: true, value: Object.freeze({ remoteAddress: '127.0.0.1' }) })
     request.headers = requestHeaders.reduce<Record<string, string>>((all, [name, value]) => {
       const key = name.toLowerCase()
       all[key] = all[key] === undefined ? value : `${all[key]}, ${value}`
@@ -887,7 +888,7 @@ export class CompatHost {
   private pnpmOutput(payload: RecordValue) {
     const operationId = text(payload.operationId, 'operationId')
     const operation = this.pnpmOperations.get(operationId)
-    if (!operation) throw new BridgeError('UNKNOWN_PNPM_OPERATION', 'pnpm output arrived after completion')
+    if (!operation) return
     const stream = text(payload.stream, 'stream')
     if (stream !== 'stdout' && stream !== 'stderr') throw new BridgeError('INVALID_PNPM_OUTPUT', 'stream must be stdout or stderr')
     const chunk = frameBody(payload.chunkBase64, maxPnpmOutputChunkBytes, 'chunkBase64')
@@ -926,7 +927,7 @@ export class CompatHost {
     }
     const done = remote.promise.then(value => {
       const result = object(value, 'pnpm result')
-      if (!Number.isInteger(result.exitCode) || (result.signal !== undefined && result.signal !== null && typeof result.signal !== 'string')) throw new BridgeError('INVALID_PNPM_RESULT', 'pnpm result is invalid')
+      if ((result.exitCode !== null && !Number.isInteger(result.exitCode)) || (result.signal !== undefined && result.signal !== null && typeof result.signal !== 'string')) throw new BridgeError('INVALID_PNPM_RESULT', 'pnpm result is invalid')
       finish()
       return { exitCode: result.exitCode, signal: result.signal ?? null }
     }, error => {
