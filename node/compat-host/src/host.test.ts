@@ -24,6 +24,11 @@ function host() {
     nextRequestId: 2n,
     callbacks: new Map(),
     sessions: new Map(),
+    agents: new Map(),
+    agentQueues: new Map(),
+    sessionPreloads: new Map(),
+    nextAgentId: 1n,
+    root: {},
     nextRouteId: 1n,
     nextToolId: 1n,
     nextOperationId: 1n,
@@ -239,4 +244,30 @@ test('pnpm completion permits a signal-only exit', async () => {
   const handle = value.runPlugin(['install', '--ignore-scripts'], process.cwd())
   value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 2n, payload: { exitCode: null, signal: 'SIGTERM' } } as Frame)
   assert.deepEqual(await handle.done, { exitCode: null, signal: 'SIGTERM' })
+})
+
+test('compat agent creation forwards the exact supplied seed', async () => {
+  const value = host()
+  const seed = [{ type: 'subagent/descriptor', seq: 0, time: 7, data: { label: 'Pinned side chat' } }]
+  let params: Record<string, unknown> | undefined
+  value.requestRemote = (_kind: string, payload: any) => {
+    params = payload.params
+    return Promise.resolve({
+      sessionId: 'child',
+      live: true,
+      status: 'idle',
+      options: { provider: 'mock', model: 'mock' },
+      session: { id: 'child', header: { parentSession: 'parent' }, events: seed },
+    })
+  }
+
+  await value.createAgent({
+    sessionId: 'child',
+    meta: { parentSession: 'parent' },
+    seed,
+    agentOptions: { provider: 'mock', model: 'mock' },
+  })
+
+  assert.deepEqual(params?.seed, seed)
+  assert.equal(params?.label, 'Pinned side chat')
 })

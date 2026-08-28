@@ -694,6 +694,7 @@ export class CompatHost {
         childSession: sessionId,
         ...(optionalText(meta.agentPreset) === undefined ? {} : { agentMode: meta.agentPreset }),
         label: this.agentLabel(options),
+        seed: Array.isArray(options.seed) ? options.seed : [],
         options: agentOptions,
         createdAt: Date.now(),
       },

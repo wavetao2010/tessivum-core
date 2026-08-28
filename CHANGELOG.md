@@ -6,6 +6,15 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## 0.1.6 — 2026-08-28
+
+### Legacy Node compatibility host
+
+- Forward the exact plugin-supplied `agents.create` seed to the native Agent
+  boundary instead of retaining it only in the compatibility host.
+- Preserve the existing `cordis.node/v1`, `cordis.plugin/v1`, and Rust API
+  surfaces.
+
 ## 0.1.5 — 2026-08-28
 
 ### Legacy Node compatibility host
