@@ -23,7 +23,11 @@ type Fiber = {
 }
 
 type Context = Record<string, any> & { fiber: Fiber }
-type LoaderEntry = { fiber?: Fiber; options: RecordValue }
+type LoaderEntry = {
+  fiber?: Fiber
+  options: RecordValue
+  update(options: RecordValue, create?: boolean, force?: boolean): Promise<void>
+}
 type Loader = {
   create(options: RecordValue): Promise<string>
   update(id: string, options: RecordValue): Promise<void>
@@ -72,6 +76,7 @@ type UpgradeSocketData = {
   pong(socket: Bun.ServerWebSocket<UpgradeSocketData>, data: Buffer): void
 }
 type SessionSnapshot = { id: string; header: RecordValue; events: unknown[] }
+type AgentSnapshot = { live: boolean; status?: string; options: RecordValue }
 
 const maxRouteRequestBytes = 2 * 1024 * 1024
 const maxRouteResponseBytes = 8 * 1024 * 1024
@@ -347,6 +352,10 @@ export class CompatHost {
   private settingsFiber: Fiber | undefined
   private nextToolId = 1n
   private readonly sessions = new Map<string, SessionSnapshot>()
+  private readonly agents = new Map<string, AgentSnapshot>()
+  private readonly agentQueues = new Map<string, Promise<void>>()
+  private readonly sessionPreloads = new Map<string, Promise<void>>()
+  private nextAgentId = 1n
   private activeInvokes = 0
   private loadingPlugin: string | undefined
 
@@ -560,15 +569,25 @@ export class CompatHost {
     if (sessionId === undefined && body.byteLength > 0) {
       try {
         const payload = JSON.parse(body.toString('utf8')) as RecordValue
-        sessionId = optionalText(payload.sessionId) ?? optionalText(payload.rootSessionId)
+        sessionId = optionalText(payload.sessionId) ?? optionalText(payload.rootSessionId) ?? optionalText(payload.childId)
       } catch {
         return
       }
     }
     if (sessionId === undefined) return
-    let result: RecordValue
+    const active = this.sessionPreloads.get(sessionId)
+    if (active !== undefined) return active
+    const pending = this.loadSession(sessionId).finally(() => {
+      if (this.sessionPreloads.get(sessionId) === pending) this.sessionPreloads.delete(sessionId)
+    })
+    this.sessionPreloads.set(sessionId, pending)
+    await pending
+  }
+
+  private async loadSession(sessionId: string) {
+    let sessionResult: RecordValue
     try {
-      result = object(await this.requestRemote('service.call', {
+      sessionResult = object(await this.requestRemote('service.call', {
         service: 'sessions@1',
         method: 'snapshot',
         params: { session: sessionId },
@@ -577,7 +596,16 @@ export class CompatHost {
       if (error instanceof BridgeError && (error.details as RecordValue | undefined)?.code === 'SESSION_NOT_FOUND') return
       throw error
     }
-    const value = object(result.session, 'session snapshot')
+    const agentResult = object(await this.requestRemote('service.call', {
+      service: 'agents@1',
+      method: 'inspectCompat',
+      params: { session: sessionId },
+    }), 'agent snapshot result')
+    this.captureSession(object(sessionResult.session, 'session snapshot'))
+    this.captureAgent(sessionId, agentResult)
+  }
+
+  private captureSession(value: RecordValue) {
     const events = value.events
     if (!Array.isArray(events)) throw new BridgeError('INVALID_SESSION', 'session snapshot events must be an array')
     const session: SessionSnapshot = {
@@ -585,8 +613,146 @@ export class CompatHost {
       header: object(value.header, 'session snapshot header'),
       events,
     }
-    this.sessions.set(sessionId, session)
+    this.sessions.set(session.id, session)
     if (this.sessions.size > 128) this.sessions.delete(this.sessions.keys().next().value!)
+  }
+
+  private captureAgent(sessionId: string, value: RecordValue) {
+    const options = value.options === null || value.options === undefined ? {} : object(value.options, 'agent options')
+    this.agents.set(sessionId, {
+      live: value.live === true,
+      ...(typeof value.status === 'string' ? { status: value.status } : {}),
+      options,
+    })
+    if (value.session && typeof value.session === 'object' && !Array.isArray(value.session)) this.captureSession(value.session as RecordValue)
+  }
+
+  private queueAgent(sessionId: string, method: string, params: RecordValue) {
+    const previous = this.agentQueues.get(sessionId) ?? Promise.resolve()
+    const pending = previous.catch(() => undefined).then(async () => {
+      await this.requestRemote('service.call', { service: 'agents@1', method, params })
+    })
+    this.agentQueues.set(sessionId, pending)
+    void pending.catch(error => this.log({ level: 'error', message: ['compat agent operation failed', json(error)] }))
+  }
+
+  private agent(sessionId: string) {
+    const session = this.sessions.get(sessionId)
+    const state = this.agents.get(sessionId)
+    if (session === undefined || state?.live !== true) return undefined
+    const send = (message: unknown, target: 'followup' | 'steer' | 'inject', wakeup: boolean) => {
+      this.queueAgent(sessionId, 'sendCompat', { session: sessionId, message, target, wakeup })
+    }
+    return {
+      id: sessionId,
+      session,
+      options: state.options,
+      status: state.status ?? 'idle',
+      inbox: {},
+      ctx: this.context(),
+      send,
+      followup: (message: unknown) => send(message, 'followup', true),
+      steer: (message: unknown) => send(message, 'steer', true),
+      inject: (message: unknown) => send(message, 'inject', false),
+      cancel: (cause: unknown, options?: RecordValue) => {
+        this.queueAgent(sessionId, 'cancelCompat', {
+          session: sessionId,
+          cause,
+          keepInbox: options?.keepInbox === true,
+        })
+      },
+      whenIdle: () => this.agentQueues.get(sessionId) ?? Promise.resolve(),
+    }
+  }
+
+  private agentLabel(options: RecordValue) {
+    const seed = Array.isArray(options.seed) ? options.seed : []
+    for (let index = seed.length - 1; index >= 0; index--) {
+      const event = seed[index]
+      if (!event || typeof event !== 'object' || Array.isArray(event)) continue
+      const value = event as RecordValue
+      if (value.type !== 'subagent/descriptor' || !value.data || typeof value.data !== 'object' || Array.isArray(value.data)) continue
+      const label = optionalText((value.data as RecordValue).label)
+      if (label !== undefined) return label
+    }
+    return 'Side chat'
+  }
+
+  private async createAgent(value: unknown) {
+    const options = object(value, 'agent create options')
+    const meta = options.meta === undefined ? {} : object(options.meta, 'agent create metadata')
+    const sessionId = text(options.sessionId, 'agent session id')
+    const parentSession = text(meta.parentSession, 'agent parent session id')
+    const agentOptions = object(options.agentOptions, 'agent options')
+    const registrationId = `${this.generation}:agent:${this.nextAgentId++}`
+    const result = object(await this.requestRemote('service.call', {
+      service: 'agents@1',
+      method: 'createCompat',
+      params: {
+        registrationId,
+        parentSession,
+        childSession: sessionId,
+        ...(optionalText(meta.agentPreset) === undefined ? {} : { agentMode: meta.agentPreset }),
+        label: this.agentLabel(options),
+        options: agentOptions,
+        createdAt: Date.now(),
+      },
+    }), 'agent create result')
+    this.captureAgent(sessionId, result)
+    const agent = this.agent(sessionId)
+    if (agent === undefined) throw new BridgeError('AGENT_NOT_FOUND', 'created agent was not published')
+    return {
+      agent,
+      dispose: async () => {
+        await this.requestRemote('service.call', {
+          service: 'agents@1',
+          method: 'disposeCompat',
+          params: { registrationId, session: sessionId },
+        })
+        this.agents.set(sessionId, { live: false, options: agentOptions })
+      },
+    }
+  }
+
+  private async resumeAgent(value: unknown) {
+    const options = object(value, 'agent resume options')
+    const sessionId = text(options.resumeSessionId, 'agent resume session id')
+    const session = this.sessions.get(sessionId)
+    if (session === undefined) throw new BridgeError('SESSION_NOT_FOUND', `session "${sessionId}" is unavailable`)
+    const parentSession = text(session.header.parentSession, 'agent parent session id')
+    const parent = object(await this.requestRemote('service.call', {
+      service: 'agents@1',
+      method: 'inspectCompat',
+      params: { session: parentSession },
+    }), 'parent agent snapshot')
+    const agentOptions = object(parent.options, 'parent agent options')
+    const registrationId = `${this.generation}:agent:${this.nextAgentId++}`
+    const result = object(await this.requestRemote('service.call', {
+      service: 'agents@1',
+      method: 'resumeCompat',
+      params: {
+        registrationId,
+        parentSession,
+        childSession: sessionId,
+        ...(optionalText(session.header.agentMode) === undefined ? {} : { agentMode: session.header.agentMode }),
+        options: agentOptions,
+        createdAt: typeof session.header.createdAt === 'number' ? session.header.createdAt : Date.now(),
+      },
+    }), 'agent resume result')
+    this.captureAgent(sessionId, result)
+    const agent = this.agent(sessionId)
+    if (agent === undefined) throw new BridgeError('AGENT_NOT_FOUND', 'resumed agent was not published')
+    return {
+      agent,
+      dispose: async () => {
+        await this.requestRemote('service.call', {
+          service: 'agents@1',
+          method: 'disposeCompat',
+          params: { registrationId, session: sessionId },
+        })
+        this.agents.set(sessionId, { live: false, options: agentOptions })
+      },
+    }
   }
 
   private registerTool(value: unknown) {
@@ -639,6 +805,11 @@ export class CompatHost {
       registerUpgrade: (definition: unknown) => this.registerUpgrade(definition),
     })
     this.context().provide('sessions', { get: (id: string) => this.sessions.get(id) })
+    this.context().provide('agents', {
+      get: (id: string) => this.agent(id),
+      create: (options: unknown) => this.createAgent(options),
+      resume: (options: unknown) => this.resumeAgent(options),
+    })
     this.context().provide('webRuntime', { trustedHosts: Object.freeze([]) })
     this.context().provide('tools', { register: (tool: unknown) => this.registerTool(tool) })
     if (!this.profile) return
@@ -936,6 +1107,20 @@ export class CompatHost {
     return this.root
   }
 
+  private exposeLoaderName(entry: LoaderEntry, name: string | undefined, target: string) {
+    if (!name || name === target) return
+    const update = entry.update.bind(entry)
+    entry.update = async (options, create, force) => {
+      entry.options.name = target
+      try {
+        await update(options, create, force)
+      } finally {
+        entry.options.name = name
+      }
+    }
+    entry.options.name = name
+  }
+
   private async loadPlugin(payload: RecordValue, signal: AbortSignal) {
     const id = text(payload.pluginId ?? payload.id, 'pluginId')
     if (this.plugins.has(id)) throw new BridgeError('DUPLICATE_PLUGIN', `plugin ${id} is already loaded`)
@@ -949,15 +1134,19 @@ export class CompatHost {
     if (!plugin) throw new BridgeError('PLUGIN_EXPORT_NOT_FOUND', `plugin export ${chosen ?? 'default'} was not found`)
     const config = configOf(payload)
     const entry = payload.entry === undefined ? undefined : object(payload.entry, 'entry')
-    const useLoader = payload.loader === true || entry?.loader === true
+    const nested = entry?.options && typeof entry.options === 'object' && !Array.isArray(entry.options)
+      ? entry.options as RecordValue
+      : undefined
+    const useLoader = payload.loader === true || entry !== undefined
     this.loadingPlugin = id
     try {
     try {
     if (useLoader) {
       const loader = this.loader
       if (!loader) throw new BridgeError('LOADER_UNAVAILABLE', 'loader is unavailable')
+      const name = optionalText(entry?.name) ?? optionalText(nested?.name)
       const options: RecordValue = { id, name: target, ...(config === undefined ? {} : { config }) }
-      const inject = entry?.options && typeof entry.options === 'object' && !Array.isArray(entry.options) ? (entry.options as RecordValue).inject : undefined
+      const inject = entry && Object.hasOwn(entry, 'inject') ? entry.inject : nested?.inject
       if (inject !== undefined) options.inject = inject
       const entryId = await loader.create(options)
       try {
@@ -965,6 +1154,8 @@ export class CompatHost {
         const loaderEntry = loader.resolve(entryId)
         if (!loaderEntry.fiber) throw new BridgeError('PLUGIN_LOAD_FAILED', `loader did not create fiber for ${id}`)
         await loaderEntry.fiber.await()
+        this.exposeLoaderName(loaderEntry, name, target)
+        this.context().emit('internal/plugin', loaderEntry.fiber)
         abortIfNeeded(signal)
         this.plugins.set(id, { fiber: loaderEntry.fiber, entry: loaderEntry })
       } catch (error) {
@@ -1031,7 +1222,12 @@ export class CompatHost {
 
   private snapshotPlugin(payload: RecordValue) {
     const id = optionalText(payload.pluginId ?? payload.id)
-    if (!id && payload.loader === true) return { entries: [...this.loader!.entries()].map(entry => this.fiberSnapshot(entry.fiber)) }
+    if (!id && payload.loader === true) return {
+      entries: [...this.loader!.entries()].map(entry => ({
+        options: json(entry.options),
+        ...this.fiberSnapshot(entry.fiber),
+      })),
+    }
     if (!id) throw new BridgeError('INVALID_PAYLOAD', 'plugin.snapshot requires pluginId')
     return this.snapshot(id)
   }

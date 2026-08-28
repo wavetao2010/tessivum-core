@@ -347,8 +347,33 @@ fn loader_runtime_loads_and_unloads_a_real_function_plugin() {
             .expect("loader-managed plugin has a host snapshot")["state"],
         "ACTIVE"
     );
+    let inventory = runtime
+        .client()
+        .request(
+            FrameKind::PluginSnapshot,
+            json!({ "loader": true }),
+            Duration::from_secs(1),
+        )
+        .expect("compat host exposes its active Loader inventory");
+    assert_eq!(inventory["entries"][0]["options"]["id"], "legacy-function");
+    assert_eq!(
+        inventory["entries"][0]["options"]["name"],
+        "legacy-function"
+    );
+    assert_eq!(inventory["entries"][0]["state"], "ACTIVE");
     let root = loader.context();
     block_on(loader.unload()).expect("loader disposes the Node runtime handle");
+    assert_eq!(
+        runtime
+            .client()
+            .request(
+                FrameKind::PluginSnapshot,
+                json!({ "loader": true }),
+                Duration::from_secs(1),
+            )
+            .expect("compat host Loader inventory follows unload")["entries"],
+        json!([])
+    );
     block_on(root.scope().dispose()).expect("loader root has no orphaned scope work");
     supervisor
         .shutdown()
@@ -371,6 +396,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 
 const pause = () => new Promise<void>(resolve => setTimeout(resolve, 500))
 writeFileSync("__MARKER__", 'started')
+await pause()
 while (!existsSync("__RELEASE__")) await pause()
 let patched = false
 

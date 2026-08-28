@@ -6,6 +6,19 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## 0.1.5 — 2026-08-28
+
+### Legacy Node compatibility host
+
+- Expose native-backed `agents` compatibility objects for Side Chat create,
+  resume, message delivery, cancellation, disposal, and session preload flows.
+- Expose settled Cordis Loader entry names and Fiber lifecycle transitions so
+  the Rust Host can report exact active plugin inventory without a second
+  Loader.
+- Serialize duplicate session preloads and retain Loader cleanup through
+  cancellation, crash, restart, and shutdown.
+- `cordis.node/v1`, `cordis.plugin/v1`, and the Rust API surface are unchanged.
+
 ## 0.1.4 — 2026-08-25
 
 ### Legacy Node compatibility host

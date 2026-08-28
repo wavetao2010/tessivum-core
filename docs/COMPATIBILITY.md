@@ -7,7 +7,7 @@ contract:
 
 | Coordinate | Current value | Rule |
 | --- | --- | --- |
-| Repository source release / Rust runtime crates | `0.1.4` | All workspace runtime crates are MIT-licensed and released together with `publish = false`; this is a repository source release, not a crates.io registry publication. |
+| Repository source release / Rust runtime crates | `0.1.5` | All workspace runtime crates are MIT-licensed and released together with `publish = false`; this is a repository source release, not a crates.io registry publication. |
 | Conformance fixture schema | `tessivum.conformance/v1` | Fixture documents must use the exact schema version. |
 | WASM ABI | `cordis.plugin/v1` | The Extism host accepts this exact string only. |
 | Node bridge | `cordis.node/v1` | Rust and Bun endpoints require this exact string before requests. |

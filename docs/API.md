@@ -1,7 +1,7 @@
 # Public API
 
 This document describes the Rust APIs exported by the four crates in this
-workspace at repository source release `0.1.4`. The public boundary is intentionally small:
+workspace at repository source release `0.1.5`. The public boundary is intentionally small:
 Core owns lifecycle, services, events, and the transactional Loader; Native,
 WASM, and legacy Node are Loader runtimes. Product-domain APIs do not belong
 here.
@@ -15,7 +15,7 @@ here.
 | `tessivum-pdk` | Rust guest SDK for `cordis.plugin/v1`. |
 | `tessivum-node-bridge` | `cordis.node/v1` framing, checked request client, process supervisor, and legacy Node Loader runtime. |
 
-All four runtime manifests currently declare version `0.1.4`, license `MIT`, and `publish = false`.
+All four runtime manifests currently declare version `0.1.5`, license `MIT`, and `publish = false`.
 They are released together as a repository source release, not as independently
 published crates.io registry packages.
 
