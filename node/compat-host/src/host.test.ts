@@ -130,6 +130,21 @@ test('nested callback responses bypass the serialized plugin request', async () 
   assert.deepEqual(responses, [1n])
 })
 
+test('heartbeats bypass a pending serialized plugin operation', async () => {
+  const value = host()
+  const { promise, resolve } = Promise.withResolvers<unknown>()
+  const writes: string[] = []
+  value.sequence = Promise.resolve()
+  value.operation = () => promise
+  value.write = (kind: string) => writes.push(kind)
+  value.receive({ protocolVersion, connectionGeneration: 5n, kind: 'plugin.load', requestId: 1n, payload: {} } as Frame)
+  await Promise.resolve()
+  value.receive({ protocolVersion, connectionGeneration: 5n, kind: 'heartbeat', payload: {} } as Frame)
+  assert.deepEqual(writes, ['heartbeat'])
+  resolve({})
+  await value.sequence
+})
+
 
 test('route invoke adapts a bounded request and completed response', async () => {
   const value = host()

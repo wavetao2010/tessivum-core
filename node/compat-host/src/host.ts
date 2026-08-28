@@ -129,6 +129,7 @@ function json(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown 
   if (typeof value === 'number') return Number.isFinite(value) ? value : String(value)
   if (typeof value === 'string') return value.length > 16_384 ? `${value.slice(0, 16_384)}…` : value
   if (typeof value === 'bigint') return value.toString()
+
   if (typeof value === 'function') return `[Function ${(value as Function).name || 'anonymous'}]`
   if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack?.slice(0, 16_384) }
   if (depth >= 8) return '[MaxDepth]'
@@ -796,6 +797,12 @@ export class CompatHost {
     if (frame.kind === 'cancel') return this.cancel(frame)
     if (frame.kind === 'pnpm.output') return this.output(frame)
     if (frame.kind === 'web.route.request') return this.dispatchInvoke(frame)
+    if (frame.kind === 'heartbeat') {
+      if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'heartbeat belongs to another connection generation'))
+      if (frame.requestId !== undefined) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'heartbeat must not have requestId'))
+      this.write('heartbeat', { ok: true })
+      return
+    }
     if (frame.kind === 'response' || frame.kind === 'error') {
       if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) {
         return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'response belongs to another connection generation'))
@@ -824,11 +831,6 @@ export class CompatHost {
     if (frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'frame belongs to another connection generation'))
     if (this.phase !== 'ready') return
     if (frame.kind === 'hello' || frame.kind === 'ready') return this.fault(frame, new BridgeError('HANDSHAKE_COMPLETE', 'handshake already completed'))
-    if (frame.kind === 'heartbeat') {
-      if (frame.requestId !== undefined) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'heartbeat must not have requestId'))
-      this.write('heartbeat', { ok: true })
-      return
-    }
     if (frame.kind === 'log') {
       if (frame.requestId !== undefined) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'log must not have requestId'))
       this.log(frame.payload)
