@@ -6,6 +6,17 @@ import { protocolVersion, type Frame } from './protocol.ts'
 
 const { WebSocket, WebSocketServer } = await import(String('ws'))
 
+type HostLifecycle = {
+  readonly product: Readonly<{ name: string; command: string }>
+  restart(): Promise<unknown>
+}
+
+type TestContext = {
+  provide(name: string, value: unknown): () => void
+  get(name: string): unknown
+  fiber: { dispose(): Promise<void> }
+}
+
 function host() {
   const value = Object.create(CompatHost.prototype) as any
   Object.assign(value, {
@@ -33,10 +44,121 @@ function host() {
     nextToolId: 1n,
     nextOperationId: 1n,
     profile: { name: 'web', dir: process.cwd() },
+    plugins: new Map(),
+    registrations: new Map(),
     write: () => undefined,
   })
   return value
 }
+
+function context(): TestContext {
+  const services = new Map<string, unknown>()
+  const disposers = new Set<() => void>()
+  return {
+    provide(name: string, value: unknown) {
+      services.set(name, value)
+      const dispose = () => {
+        if (services.get(name) === value) services.delete(name)
+        disposers.delete(dispose)
+      }
+      disposers.add(dispose)
+      return dispose
+    },
+    get(name: string) {
+      return services.get(name)
+    },
+    fiber: {
+      async dispose() {
+        for (const dispose of [...disposers]) dispose()
+      },
+    },
+  }
+}
+
+async function withHostLifecycle<T>(value: string | undefined, callback: () => T | Promise<T>) {
+  const previous = process.env.TESSIVUM_HOST_LIFECYCLE
+  if (value === undefined) delete process.env.TESSIVUM_HOST_LIFECYCLE
+  else process.env.TESSIVUM_HOST_LIFECYCLE = value
+  try {
+    return await callback()
+  } finally {
+    if (previous === undefined) delete process.env.TESSIVUM_HOST_LIFECYCLE
+    else process.env.TESSIVUM_HOST_LIFECYCLE = previous
+  }
+}
+
+function hostLifecycle(root: TestContext): HostLifecycle {
+  const service = root.get('hostLifecycle')
+  if (!service || typeof service !== 'object' || !('product' in service) || !('restart' in service) || typeof service.restart !== 'function') {
+    throw new Error('host lifecycle was not provided')
+  }
+  return service as HostLifecycle
+}
+
+test('host lifecycle is absent unless precisely enabled', async () => {
+  for (const flag of [undefined, '', '0', 'true']) {
+    await withHostLifecycle(flag, () => {
+      const value = host()
+      const root = context()
+      value.root = root
+      value.installCompatibilityServices()
+      assert.equal(root.get('hostLifecycle'), undefined)
+    })
+  }
+})
+
+test('host lifecycle forwards its fixed restart request', async () => {
+  await withHostLifecycle('1', async () => {
+    const value = host()
+    const root = context()
+    const success = Object.freeze({ accepted: true })
+    const calls: [string, unknown][] = []
+    value.root = root
+    value.requestRemote = (kind: string, payload: unknown) => {
+      calls.push([kind, payload])
+      return Promise.resolve(success)
+    }
+    value.installCompatibilityServices()
+
+    const lifecycle = hostLifecycle(root)
+    assert.equal(Object.isFrozen(lifecycle.product), true)
+    assert.deepEqual(lifecycle.product, { name: 'Tessivum', command: 'tessivum web' })
+    assert.equal(await lifecycle.restart(), success)
+    assert.deepEqual(calls, [['service.call', { service: 'hostLifecycle@1', method: 'restart', params: {} }]])
+  })
+})
+
+test('host lifecycle preserves structured remote errors', async () => {
+  await withHostLifecycle('1', async () => {
+    const value = host()
+    const root = context()
+    value.root = root
+    value.installCompatibilityServices()
+    const lifecycle = hostLifecycle(root)
+    for (const remote of [
+      Object.freeze({ code: 'HOST_BUSY', message: 'restart already in progress' }),
+      Object.freeze({ code: 'SERVICE_UNAVAILABLE', message: 'host lifecycle is unavailable' }),
+    ]) {
+      value.requestRemote = () => Promise.reject(remote)
+      await assert.rejects(lifecycle.restart(), error => error === remote)
+    }
+  })
+})
+
+test('host lifecycle is disposed with its owning context', async () => {
+  await withHostLifecycle('1', async () => {
+    const value = host()
+    const root = context()
+    value.root = root
+    value.installCompatibilityServices()
+    const lifecycle = hostLifecycle(root)
+
+    await value.shutdown()
+
+    assert.equal(root.get('hostLifecycle'), undefined)
+    await assert.rejects(lifecycle.restart(), error => typeof error === 'object' && error !== null && 'code' in error && error.code === 'HOST_CLOSING')
+  })
+})
 
 test('route registration flushes registration then removal', async () => {
   const value = host()

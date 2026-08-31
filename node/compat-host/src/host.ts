@@ -86,6 +86,7 @@ const maxPnpmOutputChunkBytes = 64 * 1024
 const maxNodeRequestId = BigInt(Number.MAX_SAFE_INTEGER - 1)
 const hopByHopHeaders = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade'])
 const headerName = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
+const hostLifecycleProduct = Object.freeze({ name: 'Tessivum', command: 'tessivum web' })
 
 const fiberStates = ['PENDING', 'LOADING', 'ACTIVE', 'FAILED', 'DISPOSED', 'UNLOADING']
 const operationKinds = new Set([
@@ -795,21 +796,31 @@ export class CompatHost {
   }
 
   private installCompatibilityServices() {
-    this.context().provide('webServer', {
+    const root = this.context()
+    root.provide('webServer', {
       register: (definition: unknown) => this.registerRoute(definition),
       registerUpgrade: (definition: unknown) => this.registerUpgrade(definition),
     })
-    this.context().provide('sessions', { get: (id: string) => this.sessions.get(id) })
-    this.context().provide('agents', {
+    root.provide('sessions', { get: (id: string) => this.sessions.get(id) })
+    root.provide('agents', {
       get: (id: string) => this.agent(id),
       create: (options: unknown) => this.createAgent(options),
       resume: (options: unknown) => this.resumeAgent(options),
     })
-    this.context().provide('webRuntime', { trustedHosts: Object.freeze([]) })
-    this.context().provide('tools', { register: (tool: unknown) => this.registerTool(tool) })
+    root.provide('webRuntime', { trustedHosts: Object.freeze([]) })
+    root.provide('tools', { register: (tool: unknown) => this.registerTool(tool) })
+    if (process.env.TESSIVUM_HOST_LIFECYCLE === '1') {
+      const generation = this.generation
+      root.provide('hostLifecycle', Object.freeze({
+        product: hostLifecycleProduct,
+        restart: () => this.phase === 'ready' && this.generation === generation && this.root === root
+          ? this.requestRemote('service.call', { service: 'hostLifecycle@1', method: 'restart', params: {} })
+          : Promise.reject(new BridgeError('HOST_CLOSING', 'host is not ready')),
+      }))
+    }
     if (!this.profile) return
-    this.context().provide('desktopProfiles', { current: { name: this.profile.name, dir: this.profile.dir } })
-    this.context().provide('desktopPnpm', { runPlugin: (args: unknown, invokingDir: unknown, signal?: AbortSignal) => this.runPlugin(args, invokingDir, signal) })
+    root.provide('desktopProfiles', { current: { name: this.profile.name, dir: this.profile.dir } })
+    root.provide('desktopPnpm', { runPlugin: (args: unknown, invokingDir: unknown, signal?: AbortSignal) => this.runPlugin(args, invokingDir, signal) })
   }
 
   private async ensureSettingsProvider() {
