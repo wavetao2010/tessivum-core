@@ -45,11 +45,17 @@ test('route registration flushes registration then removal', async () => {
     calls.push([kind, payload])
     return Promise.resolve({})
   }
-  const dispose = value.registerRoute({ kind: 'exact', path: '/dsh-market/test', handler: () => undefined })
+  const dispose = value.registerRoute({ kind: 'exact', path: '/dream-skin/api', handler: () => undefined })
   await value.flushRoutes()
   dispose()
   await value.flushRoutes()
   assert.deepEqual(calls.map(([kind]) => kind), ['web.route.register', 'web.route.unregister'])
+})
+
+test('route registration rejects product root and API overlap', () => {
+  const value = host()
+  assert.throws(() => value.registerRoute({ kind: 'prefix', path: '/', handler: () => undefined }), /route path is invalid/)
+  assert.throws(() => value.registerRoute({ kind: 'prefix', path: '/api/plugin', handler: () => undefined }), /reserved API namespace/)
 })
 
 test('upgrade registration publishes and removes its loopback backend', async () => {

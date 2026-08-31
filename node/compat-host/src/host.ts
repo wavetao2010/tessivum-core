@@ -178,15 +178,9 @@ function profileFromEnvironment(): Profile | undefined {
 
 function routePath(value: unknown) {
   const path = text(value, 'route path')
-  if (!path.startsWith('/') || path.includes('\0') || path.includes('?') || path.includes('#') || path.includes('\\')) throw new BridgeError('INVALID_ROUTE', 'route path is invalid')
-  let decoded: string
-  try {
-    decoded = decodeURIComponent(path)
-  } catch {
-    throw new BridgeError('INVALID_ROUTE', 'route path has invalid escapes')
-  }
-  if (decoded.split('/').some(segment => segment === '.' || segment === '..')) throw new BridgeError('INVALID_ROUTE', 'route path traversal is forbidden')
-  if (!['/dsh-market', '/sidebar'].some(root => path === root || path.startsWith(`${root}/`))) throw new BridgeError('INVALID_ROUTE', 'route path is outside the supported compatibility roots')
+  if (!path.startsWith('/') || path === '/' || path.includes('\0') || path.includes('%') || path.includes('?') || path.includes('#') || path.includes('\\')) throw new BridgeError('INVALID_ROUTE', 'route path is invalid')
+  if (path.split('/').some(segment => segment === '.' || segment === '..')) throw new BridgeError('INVALID_ROUTE', 'route path traversal is forbidden')
+  if (path === '/api' || path.startsWith('/api/')) throw new BridgeError('INVALID_ROUTE', 'route path overlaps the reserved API namespace')
   return path
 }
 
