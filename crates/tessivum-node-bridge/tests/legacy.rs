@@ -382,11 +382,11 @@ fn loader_runtime_loads_and_unloads_a_real_function_plugin() {
 
 #[test]
 fn cancelled_loader_load_and_delayed_disposers_leave_no_stale_handles() {
-    let race_file = std::env::temp_dir().join(format!(
+    let race_file = PathBuf::from(fixture_path(&format!(
         "tessivum-node-bridge-race-{}-{}.ts",
         std::process::id(),
         NEXT_RACE_FIXTURE.fetch_add(1, Ordering::Relaxed),
-    ));
+    )));
     let loader_marker = race_file.with_extension("started");
     let loader_release = race_file.with_extension("release");
     let marker_json = serde_json::to_string(&loader_marker).expect("marker path serializes");
