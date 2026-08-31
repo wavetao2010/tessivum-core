@@ -52,10 +52,11 @@ test('route registration flushes registration then removal', async () => {
   assert.deepEqual(calls.map(([kind]) => kind), ['web.route.register', 'web.route.unregister'])
 })
 
-test('route registration rejects product root and API overlap', () => {
+test('route registration rejects unsupported namespaces', () => {
   const value = host()
-  assert.throws(() => value.registerRoute({ kind: 'prefix', path: '/', handler: () => undefined }), /route path is invalid/)
-  assert.throws(() => value.registerRoute({ kind: 'prefix', path: '/api/plugin', handler: () => undefined }), /reserved API namespace/)
+  assert.throws(() => value.registerRoute({ kind: 'prefix', path: '/', handler: () => undefined }), /supported compatibility roots/)
+  assert.throws(() => value.registerRoute({ kind: 'prefix', path: '/api/plugin', handler: () => undefined }), /supported compatibility roots/)
+  assert.throws(() => value.registerRoute({ kind: 'prefix', path: '/dream-skin-evil', handler: () => undefined }), /supported compatibility roots/)
 })
 
 test('upgrade registration publishes and removes its loopback backend', async () => {

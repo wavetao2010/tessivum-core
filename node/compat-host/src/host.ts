@@ -178,9 +178,9 @@ function profileFromEnvironment(): Profile | undefined {
 
 function routePath(value: unknown) {
   const path = text(value, 'route path')
-  if (!path.startsWith('/') || path === '/' || path.includes('\0') || path.includes('%') || path.includes('?') || path.includes('#') || path.includes('\\')) throw new BridgeError('INVALID_ROUTE', 'route path is invalid')
+  if (!path.startsWith('/') || path.includes('\0') || path.includes('%') || path.includes('?') || path.includes('#') || path.includes('\\')) throw new BridgeError('INVALID_ROUTE', 'route path is invalid')
   if (path.split('/').some(segment => segment === '.' || segment === '..')) throw new BridgeError('INVALID_ROUTE', 'route path traversal is forbidden')
-  if (path === '/api' || path.startsWith('/api/')) throw new BridgeError('INVALID_ROUTE', 'route path overlaps the reserved API namespace')
+  if (!['/dsh-market', '/sidebar', '/dream-skin'].some(root => path === root || path.startsWith(root) && path[root.length] === '/')) throw new BridgeError('INVALID_ROUTE', 'route path is outside the supported compatibility roots')
   return path
 }
 
