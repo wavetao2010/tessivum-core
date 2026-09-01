@@ -191,7 +191,7 @@ fn service_call_wire_rejects_aliases_and_unsafe_service_names() {
         json!({ "service": "legacy.function", "method": "inspect", "params": [], "serviceId": "legacy.function" }),
         json!({ "service": "", "method": "inspect", "params": [] }),
         json!({ "service": "legacy function", "method": "inspect", "params": [] }),
-        json!({ "service": "legacy\u0000function", "method": "inspect", "params": [] }),
+        json!({ "service": "legacy\0function", "method": "inspect", "params": [] }),
         json!({ "service": "a".repeat(257), "method": "inspect", "params": [] }),
     ] {
         let frame = Frame::request(7, 11, FrameKind::ServiceCall, payload);
