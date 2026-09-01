@@ -219,7 +219,7 @@ other rows retain their noted direct-caller alternatives, while
 | `plugin.update` | `{ "pluginId": "...", "config": <JSON> }` |
 | `plugin.dispose` | `{ "pluginId": "..." }` |
 | `plugin.snapshot` | `{ "pluginId": "..." }` (or `{ "loader": true }`) |
-| `service.call` | `{ "service": "...", "method": "...", "params": <object or array> }` |
+| `service.call` | `{ "service": "...", "method": "...", "params": <object or Node-local compatibility array> }` |
 | `service.provide` | `{ "name" or "service": "...", "registrationId"?: "...", "value"?: <JSON> }` |
 | `service.remove` | `{ "registrationId" or "id": "..." }`, or a service name from which the default registration ID is derived |
 | `event.subscribe` | `{ "event" or "name": "...", "callbackId": "...", "registrationId"?: "...", "options"?: <object> }` |
@@ -229,13 +229,14 @@ other rows retain their noted direct-caller alternatives, while
 
 `service.call` requires all three fields and rejects unknown fields and the legacy
 `name`, `args`, and `serviceId` aliases. Generic Node-provided Cordis services
-use any nonblank bounded service name, such as `legacy.function`; only
-DomainBridge's Rust-owned product services use versioned identifiers such as
+use any nonblank bounded unversioned service name, such as `legacy.function`;
+only DomainBridge's Rust-owned product services use versioned identifiers such as
 `sessions@1`.
 
-`params` is the invocation argument: an object is passed as one argument. An
-array is positional only for existing explicitly positional Node-local service
-methods (including an empty array for no arguments).
+`params` is the invocation argument: an object is passed as one argument.
+Positional arrays are a Node-local compatibility form for arbitrary unversioned
+Node-provided Cordis services and explicitly known positional Node-local methods.
+DomainBridge product methods use strict object DTOs.
 
 For `plugin.load`, an absolute, `file:`, or relative `package.location` is used
 as an import target; otherwise the package specifier is imported. The host

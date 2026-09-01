@@ -159,3 +159,45 @@ fn pnpm_output_is_an_uncorrelated_notification() {
     assert!(wire.get("requestId").is_none());
     assert_eq!(codec.decode(&encoded).expect("notification decodes"), frame);
 }
+
+#[test]
+fn service_call_wire_accepts_plugin_arrays_and_product_dtos() {
+    let codec = FrameCodec::default();
+    for frame in [
+        Frame::request(
+            7,
+            11,
+            FrameKind::ServiceCall,
+            json!({ "service": "legacy.function", "method": "inspect", "params": ["node-api"] }),
+        ),
+        Frame::request(
+            7,
+            12,
+            FrameKind::ServiceCall,
+            json!({ "service": "sessions@1", "method": "snapshot", "params": { "session": "session-1" } }),
+        ),
+    ] {
+        let encoded = codec.encode(&frame).expect("canonical service call encodes");
+        assert_eq!(codec.decode(&encoded).expect("canonical service call decodes"), frame);
+    }
+}
+
+#[test]
+fn service_call_wire_rejects_aliases_and_unsafe_service_names() {
+    let codec = FrameCodec::default();
+    for payload in [
+        json!({ "service": "legacy.function", "method": "inspect", "params": [], "name": "legacy.function" }),
+        json!({ "service": "legacy.function", "method": "inspect", "params": [], "args": [] }),
+        json!({ "service": "legacy.function", "method": "inspect", "params": [], "serviceId": "legacy.function" }),
+        json!({ "service": "", "method": "inspect", "params": [] }),
+        json!({ "service": "legacy function", "method": "inspect", "params": [] }),
+        json!({ "service": "legacy\u0000function", "method": "inspect", "params": [] }),
+        json!({ "service": "a".repeat(257), "method": "inspect", "params": [] }),
+    ] {
+        let frame = Frame::request(7, 11, FrameKind::ServiceCall, payload);
+        let body = serde_json::to_vec(&frame).expect("frame serializes for inbound wire test");
+        let mut wire = (body.len() as u32).to_be_bytes().to_vec();
+        wire.extend(body);
+        assert!(matches!(codec.decode(&wire), Err(BridgeError::InvalidFrame(_))));
+    }
+}
