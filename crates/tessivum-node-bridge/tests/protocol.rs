@@ -177,8 +177,15 @@ fn service_call_wire_accepts_plugin_arrays_and_product_dtos() {
             json!({ "service": "sessions@1", "method": "snapshot", "params": { "session": "session-1" } }),
         ),
     ] {
-        let encoded = codec.encode(&frame).expect("canonical service call encodes");
-        assert_eq!(codec.decode(&encoded).expect("canonical service call decodes"), frame);
+        let encoded = codec
+            .encode(&frame)
+            .expect("canonical service call encodes");
+        assert_eq!(
+            codec
+                .decode(&encoded)
+                .expect("canonical service call decodes"),
+            frame
+        );
     }
 }
 
@@ -198,6 +205,9 @@ fn service_call_wire_rejects_aliases_and_unsafe_service_names() {
         let body = serde_json::to_vec(&frame).expect("frame serializes for inbound wire test");
         let mut wire = (body.len() as u32).to_be_bytes().to_vec();
         wire.extend(body);
-        assert!(matches!(codec.decode(&wire), Err(BridgeError::InvalidFrame(_))));
+        assert!(matches!(
+            codec.decode(&wire),
+            Err(BridgeError::InvalidFrame(_))
+        ));
     }
 }

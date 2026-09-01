@@ -1,5 +1,5 @@
 import { Buffer } from 'node:buffer'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { type IncomingMessage } from 'node:http'
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
@@ -81,6 +81,12 @@ type AgentSnapshot = { live: boolean; status?: string; options: RecordValue }
 const maxRouteRequestBytes = 2 * 1024 * 1024
 const maxRouteResponseBytes = 8 * 1024 * 1024
 const maxRouteHeaders = 128
+const apiErrorCodes = new Set([
+  'bad-request', 'cancelled', 'session-not-found', 'model-unavailable',
+  'settings-conflict', 'settings-rejected', 'credential-rejected',
+  'directory-unreadable', 'directory-exists', 'directory-create-failed',
+  'directory-picker-unavailable', 'title-invalid', 'fork-unavailable',
+])
 const maxRouteHeaderBytes = 32 * 1024
 const maxPnpmOutputChunkBytes = 64 * 1024
 const maxNodeRequestId = BigInt(Number.MAX_SAFE_INTEGER - 1)
@@ -362,6 +368,8 @@ export class CompatHost {
   private nextAgentId = 1n
   private activeInvokes = 0
   private loadingPlugin: string | undefined
+  private listenerHost = process.env.TESSIVUM_WEB_LISTENER_HOST ?? '127.0.0.1'
+  private listenerPort = Number(process.env.TESSIVUM_WEB_LISTENER_PORT ?? 0)
 
   constructor() {
     installVendorResolver(this.vendor)
@@ -804,12 +812,180 @@ export class CompatHost {
     }
   }
 
+  private apiDomain(service: string, aliases: Record<string, string> = {}) {
+    return new Proxy(Object.create(null), {
+      get: (_target, property) => {
+        if (property === 'then') return undefined
+        if (typeof property !== 'string') return undefined
+        return async (request: unknown, signal?: AbortSignal) => {
+          const envelope = object(request, 'RPC request')
+          const rpcId = text(envelope.rpcId, 'rpcId')
+          const cancellation = signal ?? new AbortController().signal
+          let pending: RemoteRequest | undefined
+          const abort = () => pending !== undefined && this.cancelRemote(pending.requestId)
+          try {
+            abortIfNeeded(cancellation)
+            pending = this.beginRemote('service.call', parseServiceCall({
+              service,
+              method: aliases[property] ?? property,
+              params: envelope.payload ?? {},
+            }))
+            cancellation.addEventListener('abort', abort, { once: true })
+            const value = await pending.promise
+            return { rpcId, result: { ok: true, value } }
+          } catch (error) {
+            const remoteError = failure(error)
+            const normalized = remoteError.code.toLowerCase().replaceAll('_', '-')
+            return {
+              rpcId,
+              result: {
+                ok: false,
+                error: {
+                  code: apiErrorCodes.has(normalized) ? normalized : 'internal',
+                  message: remoteError.message,
+                  details: record(remoteError.details) ? remoteError.details : {},
+                },
+              },
+            }
+          } finally {
+            cancellation.removeEventListener('abort', abort)
+          }
+        }
+      },
+    })
+  }
+
+  private async *hostEvents(stream: 'host' | 'mux', request: unknown, signal?: AbortSignal) {
+    const envelope = object(request, 'event stream request')
+    text(envelope.rpcId, 'rpcId')
+    const cancellation = signal ?? new AbortController().signal
+    const registrationId = `${this.generation}:host-events:${this.nextOperationId++}`
+    const callbackId = `${registrationId}:event`
+    let controller: ReadableStreamDefaultController<unknown> | undefined
+    let pendingSubscribe: RemoteRequest | undefined
+    const events = new ReadableStream<unknown>({ start: value => { controller = value } })
+    const abort = () => {
+      controller?.error(cancellation.reason ?? new DOMException('Aborted', 'AbortError'))
+      if (pendingSubscribe !== undefined) this.cancelRemote(pendingSubscribe.requestId)
+    }
+    this.callbacks.set(callbackId, (payload: unknown) => {
+      const value = object(payload, 'host event callback')
+      const event = { ...object(value.event, 'host event') }
+      const rpcId = optionalText(event.rpcId) ?? randomUUID()
+      delete event.rpcId
+      controller?.enqueue({ rpcId, payload: event })
+      return {}
+    })
+    cancellation.addEventListener('abort', abort, { once: true })
+    let subscribed = false
+    try {
+      abortIfNeeded(cancellation)
+      pendingSubscribe = this.beginRemote('service.call', {
+        service: 'hostEvents@1',
+        method: 'subscribe',
+        params: { registrationId, callbackId, stream },
+      })
+      await pendingSubscribe.promise
+      pendingSubscribe = undefined
+      subscribed = true
+      for await (const event of events) yield event
+    } finally {
+      cancellation.removeEventListener('abort', abort)
+      this.callbacks.delete(callbackId)
+      try { controller?.close() } catch {}
+      if (subscribed && this.phase === 'ready') {
+        await this.requestRemote('service.call', {
+          service: 'hostEvents@1',
+          method: 'unsubscribe',
+          params: { registrationId },
+        }).catch(() => undefined)
+      }
+    }
+  }
+
+  private apiProxy() {
+    const host = this.apiDomain('host@1')
+    const events = {
+      mux: (request: unknown, signal?: AbortSignal) => this.hostEvents('mux', request, signal),
+      host: (request: unknown, signal?: AbortSignal) => this.hostEvents('host', request, signal),
+    }
+    return Object.freeze({
+      sessions: this.apiDomain('sessions@1'),
+      subagents: this.apiDomain('subagents@1'),
+      workspace: this.apiDomain('workspaces@1'),
+      host,
+      goals: this.apiDomain('goals@1'),
+      skills: this.apiDomain('skills@1'),
+      agentPresets: this.apiDomain('agentPresets@1'),
+      agentModes: this.apiDomain('agentModes@1'),
+      settings: this.apiDomain('settings@1', { describe: 'list' }),
+      credentials: this.apiDomain('credentials@1', { describe: 'describeMany' }),
+      llm: this.apiDomain('models@1'),
+      remoteAccess: this.apiDomain('remoteAccess@1'),
+      events,
+      downloads: Object.freeze({
+        sessionLog: async () => { throw new BridgeError('DOWNLOAD_UNAVAILABLE', 'session log download is not available through the compatibility host') },
+      }),
+      respond: async (message: unknown) => {
+        const response = object(message, 'client response')
+        const result = object(response.result, 'client response result')
+        if (result.ok !== true) return { accepted: false, reason: 'bad-response' }
+        const value = object(result.value, 'client response value')
+        const method = Object.hasOwn(value, 'approvalId') ? 'respondApproval' : 'respondQuestion'
+        return this.requestRemote('service.call', {
+          service: 'hostEvents@1',
+          method,
+          params: { rpcId: text(response.rpcId, 'rpcId'), ...value },
+        })
+      },
+    })
+  }
+
   private installCompatibilityServices() {
     const root = this.context()
-    root.provide('webServer', {
+    const listener = {
       register: (definition: unknown) => this.registerRoute(definition),
       registerUpgrade: (definition: unknown) => this.registerUpgrade(definition),
+    }
+    Object.defineProperties(listener, {
+      host: { enumerable: true, get: () => this.listenerHost },
+      port: { enumerable: true, get: () => this.listenerPort },
     })
+    root.provide('webServer', listener)
+    if (process.env.TESSIVUM_WEB_LISTENER_HOST !== undefined) {
+      void this.requestRemote('service.call', {
+        service: 'webListener@1', method: 'describe', params: {},
+      }).then(value => {
+        const snapshot = object(value, 'web listener snapshot')
+        this.listenerHost = text(snapshot.host, 'web listener host')
+        const port = Number(snapshot.port)
+        if (Number.isInteger(port) && port >= 0 && port <= 65_535) this.listenerPort = port
+      }).catch(() => undefined)
+    }
+    root.provide('commands', Object.freeze({
+      list: async (sessionId: string) => {
+        const result = object(await this.requestRemote('service.call', {
+          service: 'commands@1', method: 'list', params: { sessionId },
+        }), 'commands list')
+        return result.items
+      },
+      execute: async (sessionId: string, line: string, signal?: AbortSignal) => {
+        const cancellation = signal ?? new AbortController().signal
+        abortIfNeeded(cancellation)
+        const request = this.beginRemote('service.call', {
+          service: 'commands@1', method: 'execute', params: { sessionId, line },
+        })
+        const abort = () => this.cancelRemote(request.requestId)
+        cancellation.addEventListener('abort', abort, { once: true })
+        try {
+          const result = object(await request.promise, 'command execution')
+          return result.execution
+        } finally {
+          cancellation.removeEventListener('abort', abort)
+        }
+      },
+    }))
+    root.provide('apiProxy', this.apiProxy())
     root.provide('sessions', { get: (id: string) => this.sessions.get(id) })
     root.provide('agents', {
       get: (id: string) => this.agent(id),

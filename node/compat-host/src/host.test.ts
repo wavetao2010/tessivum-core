@@ -160,6 +160,86 @@ test('host lifecycle is disposed with its owning context', async () => {
   })
 })
 
+test('native facades preserve RPC envelopes and listener authority', async () => {
+  const value = host()
+  const root = context()
+  const calls: [string, unknown][] = []
+  value.listenerHost = '127.0.0.1'
+  value.listenerPort = 3080
+  value.root = root
+  value.beginRemote = (kind: string, payload: unknown) => {
+    calls.push([kind, payload])
+    return { requestId: 2n, promise: Promise.resolve({ items: [{ sessionId: 'session-1' }] }) }
+  }
+  value.installCompatibilityServices()
+
+  const api = root.get('apiProxy') as {
+    sessions: { list(request: unknown): Promise<unknown> }
+    settings: { describe(request: unknown): Promise<unknown> }
+    credentials: { describe(request: unknown): Promise<unknown> }
+    goals: { create(request: unknown): Promise<unknown> }
+    skills: { list(request: unknown): Promise<unknown> }
+    agentPresets: { list(request: unknown): Promise<unknown> }
+    agentModes: { list(request: unknown): Promise<unknown> }
+    host: { describe(request: unknown): Promise<unknown> }
+    remoteAccess: { describe(request: unknown): Promise<unknown> }
+  }
+  assert.deepEqual(await api.sessions.list({ rpcId: 'rpc-1', payload: {} }), {
+    rpcId: 'rpc-1',
+    result: { ok: true, value: { items: [{ sessionId: 'session-1' }] } },
+  })
+  await api.settings.describe({ rpcId: 'rpc-2', payload: {} })
+  await api.credentials.describe({ rpcId: 'rpc-3', payload: {} })
+  await api.goals.create({ rpcId: 'rpc-4', payload: { sessionId: 'session-1', objective: 'ship' } })
+  await api.skills.list({ rpcId: 'rpc-5', payload: { sessionId: 'session-1' } })
+  await api.agentPresets.list({ rpcId: 'rpc-6', payload: {} })
+  await api.agentModes.list({ rpcId: 'rpc-7', payload: {} })
+  await api.host.describe({ rpcId: 'rpc-8', payload: {} })
+  await api.remoteAccess.describe({ rpcId: 'rpc-9', payload: {} })
+  assert.deepEqual(calls, [
+    ['service.call', { service: 'sessions@1', method: 'list', params: {} }],
+    ['service.call', { service: 'settings@1', method: 'list', params: {} }],
+    ['service.call', { service: 'credentials@1', method: 'describeMany', params: {} }],
+    ['service.call', { service: 'goals@1', method: 'create', params: { sessionId: 'session-1', objective: 'ship' } }],
+    ['service.call', { service: 'skills@1', method: 'list', params: { sessionId: 'session-1' } }],
+    ['service.call', { service: 'agentPresets@1', method: 'list', params: {} }],
+    ['service.call', { service: 'agentModes@1', method: 'list', params: {} }],
+    ['service.call', { service: 'host@1', method: 'describe', params: {} }],
+    ['service.call', { service: 'remoteAccess@1', method: 'describe', params: {} }],
+  ])
+
+  const webServer = root.get('webServer') as { readonly host: string; readonly port: number }
+  assert.equal(webServer.host, '127.0.0.1')
+  assert.equal(webServer.port, 3080)
+  assert.equal(Object.getOwnPropertyDescriptor(webServer, 'host')?.set, undefined)
+})
+
+test('commands facade forwards cancellation to the owning bridge request', async () => {
+  const value = host()
+  const root = context()
+  let cancelled: bigint | undefined
+  let reject!: (error: unknown) => void
+  value.root = root
+  value.beginRemote = () => ({
+    requestId: 8n,
+    promise: new Promise((_resolve, rejectPromise) => { reject = rejectPromise }),
+  })
+  value.cancelRemote = (requestId: bigint) => {
+    cancelled = requestId
+    reject(new Error('cancelled'))
+    return true
+  }
+  value.installCompatibilityServices()
+  const commands = root.get('commands') as {
+    execute(sessionId: string, line: string, signal?: AbortSignal): Promise<unknown>
+  }
+  const controller = new AbortController()
+  const execution = commands.execute('session-1', '/compact', controller.signal)
+  controller.abort()
+  await assert.rejects(execution, /cancelled/)
+  assert.equal(cancelled, 8n)
+})
+
 test('canonical service calls dispatch object and permitted positional params', async () => {
   const value = host()
   const root = context()

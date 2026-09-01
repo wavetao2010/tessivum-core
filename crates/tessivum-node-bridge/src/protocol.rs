@@ -45,7 +45,11 @@ struct ServiceCallWire {
 }
 
 impl ServiceCall {
-    pub fn new(service: impl Into<String>, method: impl Into<String>, params: Value) -> BridgeResult<Self> {
+    pub fn new(
+        service: impl Into<String>,
+        method: impl Into<String>,
+        params: Value,
+    ) -> BridgeResult<Self> {
         let service = service.into();
         let method = method.into();
         if !service_identifier(&service) {
@@ -71,8 +75,9 @@ impl ServiceCall {
     }
 
     pub fn parse(payload: Value) -> BridgeResult<Self> {
-        serde_json::from_value(payload)
-            .map_err(|error| BridgeError::InvalidFrame(format!("invalid service.call payload: {error}")))
+        serde_json::from_value(payload).map_err(|error| {
+            BridgeError::InvalidFrame(format!("invalid service.call payload: {error}"))
+        })
     }
 }
 
