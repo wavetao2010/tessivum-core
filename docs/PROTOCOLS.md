@@ -185,6 +185,8 @@ compat-host reads `CORDIS_NODE_MAX_FRAME_BYTES` for its limit.
 | `event.subscribe`, `event.emit`, `event.callback` | required | Generic event operations. |
 | `registration.dispose` | required | Remove a registered service or listener. |
 
+Request IDs are owned by the endpoint that initiates a request: Rust-generated IDs are odd, beginning at `1`, while Node-generated IDs are even, beginning at `2`; each side increments its IDs by `2`. Responses and cancels retain the initiating request ID, preventing collisions and preserving correlation for bidirectional calls.
+
 `response` carries the successful JSON payload. `error` carries
 `{ "code": string, "message": string, "details"?: <JSON> }`. `cancel` is
 terminal for the request ID; the Rust client also includes
