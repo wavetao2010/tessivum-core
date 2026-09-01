@@ -544,8 +544,7 @@ process.stdin.on("data", (chunk) => {
     let _ = fs::remove_file(pid_file);
 }
 
-#[test]
-fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
+fn assert_inbound_request_cancel(kind: FrameKind) {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
     let reader = socket.try_clone().expect("client read side clones");
     let client = BridgeClient::from_io(reader, socket, 41, ClientConfig::default())
@@ -557,10 +556,10 @@ fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
         let (cancelled, changed) = &*observed;
         let mut cancelled = cancelled.lock().expect("state lock holds");
         match frame.kind {
-            FrameKind::PnpmRun => {
+            candidate if candidate == kind => {
                 events
-                    .send(FrameKind::PnpmRun)
-                    .expect("test observes pnpm run");
+                    .send(kind)
+                    .expect("test observes cancellable request");
                 while !*cancelled {
                     cancelled = changed.wait(cancelled).expect("state wait holds");
                 }
@@ -592,18 +591,20 @@ fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
         codec
             .write_frame(&mut peer, &Frame::ready(41))
             .expect("test host sends ready");
+        let payload = if kind == FrameKind::PnpmRun {
+            json!({ "operationId": "op" })
+        } else {
+            json!({ "service": "commands@1", "method": "execute", "params": {} })
+        };
         codec
-            .write_frame(
-                &mut peer,
-                &Frame::request(41, 9, FrameKind::PnpmRun, json!({ "operationId": "op" })),
-            )
-            .expect("test host sends pnpm run");
+            .write_frame(&mut peer, &Frame::request(41, 9, kind, payload))
+            .expect("test host sends cancellable request");
         codec
             .write_frame(&mut peer, &Frame::cancel(41, 9))
-            .expect("test host cancels pnpm run");
+            .expect("test host cancels request");
         let response = codec
             .read_frame(&mut peer)
-            .expect("cancelled pnpm run responds");
+            .expect("cancelled request responds");
         assert_eq!(response.kind, FrameKind::Response);
         assert_eq!(response.request_id, Some(9));
         host_done.send(()).expect("test observes host response");
@@ -619,10 +620,20 @@ fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
             .recv_timeout(Duration::from_secs(1))
             .unwrap(),
     ];
-    assert!(events.contains(&FrameKind::PnpmRun));
+    assert!(events.contains(&kind));
     assert!(events.contains(&FrameKind::Cancel));
     observed_host
         .recv_timeout(Duration::from_secs(1))
         .expect("cancelled pnpm run returns a response");
     client.close();
+}
+
+#[test]
+fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
+    assert_inbound_request_cancel(FrameKind::PnpmRun);
+}
+
+#[test]
+fn inbound_service_call_does_not_block_its_generic_cancel() {
+    assert_inbound_request_cancel(FrameKind::ServiceCall);
 }

@@ -204,15 +204,15 @@ struct ClientInner {
     on_log: Mutex<Option<LogHandler>>,
     extensions: Mutex<BTreeSet<String>>,
     last_heartbeat: Mutex<Instant>,
-    pnpm_runs: Arc<Mutex<BTreeMap<u64, bool>>>,
+    cancellable_requests: Arc<Mutex<BTreeMap<u64, bool>>>,
 }
 
-struct PnpmRunPermit {
+struct CancellableRequestPermit {
     active: Arc<Mutex<BTreeMap<u64, bool>>>,
     request_id: u64,
 }
 
-impl Drop for PnpmRunPermit {
+impl Drop for CancellableRequestPermit {
     fn drop(&mut self) {
         lock(&self.active).remove(&self.request_id);
     }
@@ -301,21 +301,21 @@ impl ClientInner {
         }
     }
 
-    fn acquire_pnpm_run(&self, request_id: u64) -> Option<PnpmRunPermit> {
-        let mut active = lock(&self.pnpm_runs);
+    fn acquire_cancellable_request(&self, request_id: u64) -> Option<CancellableRequestPermit> {
+        let mut active = lock(&self.cancellable_requests);
         if active.len() >= self.config.queue_capacity {
             return None;
         }
         active.insert(request_id, false);
-        Some(PnpmRunPermit {
-            active: Arc::clone(&self.pnpm_runs),
+        Some(CancellableRequestPermit {
+            active: Arc::clone(&self.cancellable_requests),
             request_id,
         })
     }
 
-    fn cancel_pnpm_run(&self, frame: Frame) {
+    fn cancel_request(&self, frame: Frame) {
         let request_id = frame.request_id.expect("validated request id");
-        let should_dispatch = lock(&self.pnpm_runs)
+        let should_dispatch = lock(&self.cancellable_requests)
             .get_mut(&request_id)
             .is_some_and(|cancelled| {
                 if *cancelled {
@@ -387,7 +387,7 @@ impl ClientInner {
                     frame.request_id.expect("validated request id"),
                     Err(BridgeError::Cancelled),
                 ) {
-                    self.cancel_pnpm_run(frame);
+                    self.cancel_request(frame);
                 }
             }
             _ => self.dispatch_request(frame),
@@ -402,9 +402,12 @@ impl ClientInner {
             )));
             return;
         }
-        if frame.kind == FrameKind::PnpmRun {
+        if matches!(
+            frame.kind,
+            FrameKind::PnpmRun | FrameKind::ServiceCall | FrameKind::ServiceProvide
+        ) {
             let request_id = frame.request_id.expect("validated request id");
-            let Some(permit) = self.acquire_pnpm_run(request_id) else {
+            let Some(permit) = self.acquire_cancellable_request(request_id) else {
                 self.respond_request(frame, Err(BridgeError::QueueFull));
                 return;
             };
@@ -495,7 +498,7 @@ impl BridgeClient {
             on_log: Mutex::new(None),
             last_heartbeat: Mutex::new(Instant::now()),
             extensions: Mutex::new(BTreeSet::new()),
-            pnpm_runs: Arc::new(Mutex::new(BTreeMap::new())),
+            cancellable_requests: Arc::new(Mutex::new(BTreeMap::new())),
         });
         spawn_writer(Arc::clone(&inner), codec.clone(), writer, outgoing_rx);
         spawn_reader(Arc::clone(&inner), codec, reader, incoming_tx);
