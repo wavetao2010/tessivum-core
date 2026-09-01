@@ -14,6 +14,9 @@ independently of crate/repository releases.
   boundary instead of retaining it only in the compatibility host.
 - Preserve the existing `cordis.node/v1`, `cordis.plugin/v1`, and Rust API
   surfaces.
+- Correlate cancellation frames with their original request IDs and propagate
+  Browser `AbortSignal` cancellation through Legacy service and command calls;
+  late replies cannot reopen a cancelled request.
 
 ## 0.1.5 — 2026-08-28
 
