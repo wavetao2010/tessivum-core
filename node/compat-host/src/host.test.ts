@@ -160,6 +160,38 @@ test('host lifecycle is disposed with its owning context', async () => {
   })
 })
 
+test('canonical service calls pass object params as one argument and preserve scoped positional params', async () => {
+  const value = host()
+  const root = context()
+  const params = Object.freeze({ id: 'tool-1' })
+  let objectArgs: unknown[] | undefined
+  root.provide('tools', {
+    register(...args: unknown[]) {
+      objectArgs = args
+      return { accepted: true }
+    },
+  })
+  root.provide('sessions', { get: (...args: unknown[]) => args })
+  value.root = root
+
+  assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 1n, payload: { service: 'tools@1', method: 'register', params } } as Frame, new AbortController().signal), { accepted: true })
+  assert.deepEqual(objectArgs, [params])
+  assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 3n, payload: { service: 'sessions@1', method: 'get', params: ['session-1'] } } as Frame, new AbortController().signal), ['session-1'])
+})
+
+test('remote service calls use canonical payloads and retain request correlation', async () => {
+  const value = host()
+  const writes: [string, unknown, bigint | undefined][] = []
+  value.write = (kind: string, payload: unknown, requestId?: bigint) => writes.push([kind, payload, requestId])
+  const params = { name: 'sidebar_open' }
+  const pending = value.remoteService({ service: 'tools@1' }).register(params)
+
+  assert.deepEqual(writes, [['service.call', { service: 'tools@1', method: 'register', params }, 2n]])
+  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 2n, payload: { registrationId: 'tool-1' } } as Frame)
+  assert.deepEqual(await pending, { registrationId: 'tool-1' })
+  assert.equal(value.outgoing.has('2'), false)
+})
+
 test('route registration flushes registration then removal', async () => {
   const value = host()
   const calls: [string, unknown][] = []

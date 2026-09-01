@@ -5,7 +5,7 @@ import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
 import { PassThrough, Readable, type Duplex } from 'node:stream'
 import { pathToFileURL } from 'node:url'
-import { FrameDecoder, ProtocolError, defaultMaxFrameBytes, encodeFrame, frameKinds, protocolVersion, type Frame } from './protocol.ts'
+import { FrameDecoder, ProtocolError, defaultMaxFrameBytes, encodeFrame, frameKinds, parseServiceCall, protocolVersion, type Frame, type ServiceCallPayload } from './protocol.ts'
 
 type RecordValue = Record<string, unknown>
 type Disposer = () => unknown
@@ -95,6 +95,11 @@ const operationKinds = new Set([
   'event.subscribe', 'event.emit', 'event.callback', 'registration.dispose', 'web.route.request',
 ])
 const knownKinds = new Set<string>(frameKinds)
+const positionalServiceMethods: Record<string, true> = {
+  'sessions@1.get': true,
+  'agents@1.get': true,
+  'desktopPnpm@1.runPlugin': true,
+}
 const rawStdoutWrite = process.stdout.write.bind(process.stdout) as (chunk: Uint8Array) => boolean
 const bunInternals = Symbol.for('::bunternal::')
 const rawStderrWrite = process.stderr.write.bind(process.stderr) as (chunk: string) => boolean
@@ -1096,7 +1101,7 @@ export class CompatHost {
       case 'plugin.update': return this.updatePlugin(object(frame.payload), signal)
       case 'plugin.dispose': return this.disposePlugin(object(frame.payload), signal)
       case 'plugin.snapshot': return this.snapshotPlugin(object(frame.payload))
-      case 'service.call': return this.callService(object(frame.payload), signal)
+      case 'service.call': return this.callService(parseServiceCall(frame.payload), signal)
       case 'service.provide': return this.provideService(object(frame.payload), signal)
       case 'service.remove': return this.removeService(object(frame.payload), signal)
       case 'event.subscribe': return this.subscribe(object(frame.payload), signal)
@@ -1257,12 +1262,15 @@ export class CompatHost {
   }
 
   private remoteService(payload: RecordValue) {
-    const serviceId = optionalText(payload.serviceId) ?? optionalText(payload.id) ?? optionalText(payload.name)
+    const service = text(payload.service, 'remote service')
     return new Proxy(Object.create(null), {
       get: (_target, property) => {
         if (property === 'then') return undefined
         if (typeof property !== 'string') return undefined
-        return (...args: unknown[]) => this.requestRemote('service.call', { serviceId, name: payload.name, method: property, args })
+        return (...args: unknown[]) => {
+          const params = args.length === 0 ? {} : args.length === 1 && record(args[0]) ? args[0] : args
+          return this.requestRemote('service.call', parseServiceCall({ service, method: property, params }))
+        }
       },
     })
   }
@@ -1288,17 +1296,21 @@ export class CompatHost {
     return { registrationId, removed: true }
   }
 
-  private async callService(payload: RecordValue, signal: AbortSignal) {
-    const name = text(payload.name ?? payload.service, 'service name')
-    const args = payload.args === undefined ? [] : payload.args
-    if (!Array.isArray(args)) throw new BridgeError('INVALID_PAYLOAD', 'service.call args must be an array')
-    const service = this.context().get(name)
-    if (service === undefined) throw new BridgeError('SERVICE_UNAVAILABLE', `service ${name} is unavailable`)
-    const method = optionalText(payload.method)
-    const callable = method ? service[method] : service
-    if (typeof callable !== 'function') {
-      if (method || args.length) throw new BridgeError('SERVICE_METHOD_NOT_FOUND', `service ${name}${method ? `.${method}` : ''} is not callable`)
-      return json(callable)
+  private async callService(payload: ServiceCallPayload, signal: AbortSignal) {
+    const call = parseServiceCall(payload)
+    const localName = call.service.slice(0, call.service.lastIndexOf('@'))
+    const service = this.context().get(call.service) ?? this.context().get(localName)
+    if (service === undefined) throw new BridgeError('SERVICE_UNAVAILABLE', `service ${call.service} is unavailable`)
+    const callable = service[call.method]
+    if (typeof callable !== 'function') throw new BridgeError('SERVICE_METHOD_NOT_FOUND', `service ${call.service}.${call.method} is not callable`)
+    let args: unknown[]
+    if (Array.isArray(call.params)) {
+      if (!Object.hasOwn(positionalServiceMethods, `${call.service}.${call.method}`)) {
+        throw new BridgeError('INVALID_PAYLOAD', `service.call ${call.service}.${call.method} does not accept positional params`)
+      }
+      args = call.params
+    } else {
+      args = [call.params]
     }
     abortIfNeeded(signal)
     const result = await settled(Reflect.apply(callable, service, args))

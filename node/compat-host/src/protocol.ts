@@ -4,6 +4,19 @@ export const protocolVersion = 'cordis.node/v1' as const
 export const defaultMaxFrameBytes = 1024 * 1024
 const maxU64 = (1n << 64n) - 1n
 
+/** Reserved service identifiers; inclusion here does not advertise host support. */
+export const plannedServiceCapabilities = [
+  'sessions@1',
+  'workspaces@1',
+  'agentModes@1',
+  'models@1',
+  'hostSettings@1',
+  'commands@1',
+  'hostEvents@1',
+  'webListener@1',
+  'remoteAccess@1',
+] as const
+
 export const frameKinds = [
   'hello', 'ready', 'response', 'error', 'cancel', 'heartbeat', 'exit', 'log',
   'plugin.load', 'plugin.update', 'plugin.dispose', 'plugin.snapshot',
@@ -49,6 +62,32 @@ export class ProtocolError extends Error {
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+export interface ServiceCallPayload {
+  service: string
+  method: string
+  params: Record<string, unknown> | unknown[]
+}
+
+const serviceCallFields: Record<string, true> = { service: true, method: true, params: true }
+const serviceIdentifier = /^[A-Za-z][A-Za-z0-9]*(?:[._-][A-Za-z0-9]+)*@[1-9]\d*$/
+const serviceMethod = /^[A-Za-z_$][A-Za-z0-9_$]*$/
+
+/** Parses only the canonical cross-runtime `service.call` payload. */
+export function parseServiceCall(value: unknown): ServiceCallPayload {
+  if (!record(value)) throw new ProtocolError('INVALID_FRAME', 'service.call payload must be an object')
+  if (Object.keys(value).some(key => !Object.hasOwn(serviceCallFields, key))) throw new ProtocolError('INVALID_FRAME', 'service.call payload contains an unknown field')
+  if (typeof value.service !== 'string' || !serviceIdentifier.test(value.service)) {
+    throw new ProtocolError('INVALID_FRAME', 'service.call service must be a nonempty versioned identifier')
+  }
+  if (typeof value.method !== 'string' || !serviceMethod.test(value.method)) {
+    throw new ProtocolError('INVALID_FRAME', 'service.call method must be a valid identifier')
+  }
+  if (!Object.hasOwn(value, 'params') || (!record(value.params) && !Array.isArray(value.params))) {
+    throw new ProtocolError('INVALID_FRAME', 'service.call params must be a JSON object or array')
+  }
+  return { service: value.service, method: value.method, params: value.params }
 }
 
 function whitespace(source: string, index: number) {
@@ -142,6 +181,7 @@ export function parseFrame(source: string): Frame {
   if (raw.protocolVersion !== protocolVersion) throw new ProtocolError('PROTOCOL_VERSION', `expected ${protocolVersion}`)
   if (typeof raw.kind !== 'string' || !frameKindSet.has(raw.kind)) throw new ProtocolError('INVALID_FRAME', 'kind must name a known frame operation')
   if (!Object.hasOwn(raw, 'payload')) throw new ProtocolError('INVALID_FRAME', 'missing payload')
+  const payload = raw.kind === 'service.call' ? parseServiceCall(raw.payload) : raw.payload
   const generation = u64(rootInteger(source, 'connectionGeneration'), 'connectionGeneration', true)!
   if (generation === 0n) throw new ProtocolError('INVALID_FRAME', 'connectionGeneration must be greater than zero')
   const requestId = u64(rootInteger(source, 'requestId'), 'requestId', false)
@@ -149,7 +189,7 @@ export function parseFrame(source: string): Frame {
   if (requiresRequestId(raw.kind) && requestId === undefined) throw new ProtocolError('INVALID_FRAME', `${raw.kind} requires requestId`)
   if (!requiresRequestId(raw.kind) && requestId !== undefined) throw new ProtocolError('INVALID_FRAME', `${raw.kind} must not carry requestId`)
   if (requestId === 0n) throw new ProtocolError('INVALID_FRAME', 'requestId must be greater than zero')
-  return { protocolVersion, connectionGeneration: generation, kind: raw.kind, ...(requestId === undefined ? {} : { requestId }), payload: raw.payload }
+  return { protocolVersion, connectionGeneration: generation, kind: raw.kind, ...(requestId === undefined ? {} : { requestId }), payload }
 }
 
 function json(frame: Frame) {
@@ -158,6 +198,7 @@ function json(frame: Frame) {
   if (requiresRequestId(frame.kind) && frame.requestId === undefined) throw new ProtocolError('INVALID_FRAME', `${frame.kind} requires requestId`)
   if (!requiresRequestId(frame.kind) && frame.requestId !== undefined) throw new ProtocolError('INVALID_FRAME', `${frame.kind} must not carry requestId`)
   if (frame.requestId !== undefined && (frame.requestId <= 0n || frame.requestId > maxU64)) throw new ProtocolError('INVALID_FRAME', 'requestId must be a nonzero u64')
+  if (frame.kind === 'service.call') parseServiceCall(frame.payload)
   let payload: string | undefined
   try {
     payload = JSON.stringify(frame.payload)
@@ -165,6 +206,7 @@ function json(frame: Frame) {
     throw new ProtocolError('INVALID_FRAME', 'payload is not JSON serializable')
   }
   if (payload === undefined) throw new ProtocolError('INVALID_FRAME', 'payload is not JSON serializable')
+  if (frame.kind === 'service.call') parseServiceCall(JSON.parse(payload))
   return `{"protocolVersion":"${protocolVersion}","connectionGeneration":${frame.connectionGeneration},"kind":${JSON.stringify(frame.kind)}${frame.requestId === undefined ? '' : `,"requestId":${frame.requestId}`},"payload":${payload}}`
 }
 
