@@ -26,7 +26,14 @@ test('canonical service call DTO round-trips through a frame', () => {
   assert.deepEqual(JSON.parse(encodeFrame(frame).subarray(4).toString()).payload, payload)
 })
 
-test('service call DTO rejects unknown, legacy, and invalid fields', () => {
+test('canonical service call DTO accepts legacy Cordis service names', () => {
+  const payload = { service: 'legacy.function', method: 'inspect', params: { value: 'node-api' } }
+  assert.deepEqual(parseServiceCall(payload), payload)
+  const frame = parseFrame(JSON.stringify({ protocolVersion, connectionGeneration: 7, kind: 'service.call', requestId: 9, payload }))
+  assert.deepEqual(frame.payload, payload)
+})
+
+test('service call DTO rejects aliases and unsafe fields', () => {
   const base = { service: 'sessions@1', method: 'snapshot', params: {} }
   for (const payload of [
     { ...base, extra: true },
@@ -34,7 +41,9 @@ test('service call DTO rejects unknown, legacy, and invalid fields', () => {
     { ...base, name: 'sessions' },
     { ...base, serviceId: 'sessions@1' },
     { ...base, service: '' },
-    { ...base, service: 'sessions' },
+    { ...base, service: 'legacy function' },
+    { ...base, service: 'legacy\u0000function' },
+    { ...base, service: 'a'.repeat(257) },
     { ...base, method: '' },
     { ...base, method: 'not.valid' },
     { ...base, params: null },

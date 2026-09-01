@@ -70,16 +70,17 @@ export interface ServiceCallPayload {
   params: Record<string, unknown> | unknown[]
 }
 
+const maxServiceNameBytes = 256
 const serviceCallFields: Record<string, true> = { service: true, method: true, params: true }
-const serviceIdentifier = /^[A-Za-z][A-Za-z0-9]*(?:[._-][A-Za-z0-9]+)*@[1-9]\d*$/
+const serviceIdentifier = /^[^\p{White_Space}\p{Cc}]+$/u
 const serviceMethod = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 
 /** Parses only the canonical cross-runtime `service.call` payload. */
 export function parseServiceCall(value: unknown): ServiceCallPayload {
   if (!record(value)) throw new ProtocolError('INVALID_FRAME', 'service.call payload must be an object')
   if (Object.keys(value).some(key => !Object.hasOwn(serviceCallFields, key))) throw new ProtocolError('INVALID_FRAME', 'service.call payload contains an unknown field')
-  if (typeof value.service !== 'string' || !serviceIdentifier.test(value.service)) {
-    throw new ProtocolError('INVALID_FRAME', 'service.call service must be a nonempty versioned identifier')
+  if (typeof value.service !== 'string' || Buffer.byteLength(value.service) > maxServiceNameBytes || !serviceIdentifier.test(value.service)) {
+    throw new ProtocolError('INVALID_FRAME', 'service.call service must be a nonblank bounded identifier')
   }
   if (typeof value.method !== 'string' || !serviceMethod.test(value.method)) {
     throw new ProtocolError('INVALID_FRAME', 'service.call method must be a valid identifier')

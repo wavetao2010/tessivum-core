@@ -160,10 +160,11 @@ test('host lifecycle is disposed with its owning context', async () => {
   })
 })
 
-test('canonical service calls pass object params as one argument and preserve scoped positional params', async () => {
+test('canonical service calls dispatch legacy Cordis names and preserve params', async () => {
   const value = host()
   const root = context()
   const params = Object.freeze({ id: 'tool-1' })
+  const legacyParams = Object.freeze({ id: 'legacy-1' })
   let objectArgs: unknown[] | undefined
   root.provide('tools', {
     register(...args: unknown[]) {
@@ -172,11 +173,13 @@ test('canonical service calls pass object params as one argument and preserve sc
     },
   })
   root.provide('sessions', { get: (...args: unknown[]) => args })
+  root.provide('legacy.function', { inspect: (...args: unknown[]) => args })
   value.root = root
 
   assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 1n, payload: { service: 'tools@1', method: 'register', params } } as Frame, new AbortController().signal), { accepted: true })
   assert.deepEqual(objectArgs, [params])
   assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 3n, payload: { service: 'sessions@1', method: 'get', params: ['session-1'] } } as Frame, new AbortController().signal), ['session-1'])
+  assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 5n, payload: { service: 'legacy.function', method: 'inspect', params: legacyParams } } as Frame, new AbortController().signal), [legacyParams])
 })
 
 test('remote service calls use canonical payloads and retain request correlation', async () => {

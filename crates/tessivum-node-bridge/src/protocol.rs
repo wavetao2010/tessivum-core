@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 pub const PROTOCOL_VERSION: &str = "cordis.node/v1";
 /// A conservative default which keeps an untrusted peer from forcing a large allocation.
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 1024 * 1024;
+const MAX_SERVICE_NAME_BYTES: usize = 256;
 
 /// Stable identifiers reserved for planned cross-runtime services. They do not advertise support.
 pub const PLANNED_SERVICE_CAPABILITIES: [&str; 9] = [
@@ -49,7 +50,7 @@ impl ServiceCall {
         let method = method.into();
         if !service_identifier(&service) {
             return Err(BridgeError::InvalidFrame(
-                "service.call service must be a nonempty versioned identifier".into(),
+                "service.call service must be a nonblank bounded identifier".into(),
             ));
         }
         if !service_method(&method) {
@@ -86,21 +87,11 @@ impl<'de> Deserialize<'de> for ServiceCall {
 }
 
 fn service_identifier(value: &str) -> bool {
-    let Some((name, version)) = value.rsplit_once('@') else {
-        return false;
-    };
-    let valid_name = !name.is_empty()
-        && name
-            .split(['.', '_', '-'])
-            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric()))
-        && name
-            .bytes()
-            .next()
-            .is_some_and(|byte| byte.is_ascii_alphabetic());
-    valid_name
-        && !version.is_empty()
-        && version.as_bytes()[0] != b'0'
-        && version.bytes().all(|byte| byte.is_ascii_digit())
+    !value.is_empty()
+        && value.len() <= MAX_SERVICE_NAME_BYTES
+        && !value
+            .chars()
+            .any(|character| character.is_whitespace() || character.is_control())
 }
 
 fn service_method(value: &str) -> bool {
