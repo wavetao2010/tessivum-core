@@ -198,12 +198,12 @@ test('remote service calls pack canonical args and retain request correlation', 
 
   assert.deepEqual(writes, [
     ['service.call', { service: 'tools@1', method: 'flush', params: {} }, 2n],
-    ['service.call', { service: 'tools@1', method: 'register', params }, 3n],
-    ['service.call', { service: 'tools@1', method: 'update', params: ['sidebar_open', { source: 'test' }] }, 4n],
+    ['service.call', { service: 'tools@1', method: 'register', params }, 4n],
+    ['service.call', { service: 'tools@1', method: 'update', params: ['sidebar_open', { source: 'test' }] }, 6n],
   ])
   value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 2n, payload: { flushed: true } } as Frame)
-  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 3n, payload: { registrationId: 'tool-1' } } as Frame)
-  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 4n, payload: { updated: true } } as Frame)
+  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 4n, payload: { registrationId: 'tool-1' } } as Frame)
+  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 6n, payload: { updated: true } } as Frame)
   assert.deepEqual(await zero, { flushed: true })
   assert.deepEqual(await object, { registrationId: 'tool-1' })
   assert.deepEqual(await multiple, { updated: true })
