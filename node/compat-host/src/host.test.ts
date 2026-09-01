@@ -160,11 +160,11 @@ test('host lifecycle is disposed with its owning context', async () => {
   })
 })
 
-test('canonical service calls dispatch legacy Cordis names and preserve params', async () => {
+test('canonical service calls dispatch object and permitted positional params', async () => {
   const value = host()
   const root = context()
   const params = Object.freeze({ id: 'tool-1' })
-  const legacyParams = Object.freeze({ id: 'legacy-1' })
+  const legacyParams = Object.freeze(['legacy-1', 'details'])
   let objectArgs: unknown[] | undefined
   root.provide('tools', {
     register(...args: unknown[]) {
@@ -179,20 +179,35 @@ test('canonical service calls dispatch legacy Cordis names and preserve params',
   assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 1n, payload: { service: 'tools@1', method: 'register', params } } as Frame, new AbortController().signal), { accepted: true })
   assert.deepEqual(objectArgs, [params])
   assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 3n, payload: { service: 'sessions@1', method: 'get', params: ['session-1'] } } as Frame, new AbortController().signal), ['session-1'])
-  assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 5n, payload: { service: 'legacy.function', method: 'inspect', params: legacyParams } } as Frame, new AbortController().signal), [legacyParams])
+  assert.deepEqual(await value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 5n, payload: { service: 'legacy.function', method: 'inspect', params: legacyParams } } as Frame, new AbortController().signal), legacyParams)
+  await assert.rejects(
+    value.operation({ protocolVersion, connectionGeneration: 5n, kind: 'service.call', requestId: 7n, payload: { service: 'tools@1', method: 'register', params: ['tool-1'] } } as Frame, new AbortController().signal),
+    error => typeof error === 'object' && error !== null && 'code' in error && error.code === 'INVALID_PAYLOAD',
+  )
 })
 
-test('remote service calls use canonical payloads and retain request correlation', async () => {
+test('remote service calls pack canonical args and retain request correlation', async () => {
   const value = host()
   const writes: [string, unknown, bigint | undefined][] = []
   value.write = (kind: string, payload: unknown, requestId?: bigint) => writes.push([kind, payload, requestId])
   const params = { name: 'sidebar_open' }
-  const pending = value.remoteService({ service: 'tools@1' }).register(params)
+  const remote = value.remoteService({ service: 'tools@1' })
+  const zero = remote.flush()
+  const object = remote.register(params)
+  const multiple = remote.update('sidebar_open', { source: 'test' })
 
-  assert.deepEqual(writes, [['service.call', { service: 'tools@1', method: 'register', params }, 2n]])
-  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 2n, payload: { registrationId: 'tool-1' } } as Frame)
-  assert.deepEqual(await pending, { registrationId: 'tool-1' })
-  assert.equal(value.outgoing.has('2'), false)
+  assert.deepEqual(writes, [
+    ['service.call', { service: 'tools@1', method: 'flush', params: {} }, 2n],
+    ['service.call', { service: 'tools@1', method: 'register', params }, 3n],
+    ['service.call', { service: 'tools@1', method: 'update', params: ['sidebar_open', { source: 'test' }] }, 4n],
+  ])
+  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 2n, payload: { flushed: true } } as Frame)
+  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 3n, payload: { registrationId: 'tool-1' } } as Frame)
+  value.resolveOutgoing({ protocolVersion, connectionGeneration: 5n, kind: 'response', requestId: 4n, payload: { updated: true } } as Frame)
+  assert.deepEqual(await zero, { flushed: true })
+  assert.deepEqual(await object, { registrationId: 'tool-1' })
+  assert.deepEqual(await multiple, { updated: true })
+  assert.equal(value.outgoing.size, 0)
 })
 
 test('route registration flushes registration then removal', async () => {

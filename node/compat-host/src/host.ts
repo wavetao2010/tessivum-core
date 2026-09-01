@@ -111,9 +111,13 @@ class BridgeError extends Error {
   }
 }
 
+function record(value: unknown): value is RecordValue {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
 function object(value: unknown, label = 'payload'): RecordValue {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new BridgeError('INVALID_PAYLOAD', `${label} must be an object`)
-  return value as RecordValue
+  if (!record(value)) throw new BridgeError('INVALID_PAYLOAD', `${label} must be an object`)
+  return value
 }
 
 function text(value: unknown, label: string) {
@@ -1305,7 +1309,7 @@ export class CompatHost {
     if (typeof callable !== 'function') throw new BridgeError('SERVICE_METHOD_NOT_FOUND', `service ${call.service}.${call.method} is not callable`)
     let args: unknown[]
     if (Array.isArray(call.params)) {
-      if (!Object.hasOwn(positionalServiceMethods, `${call.service}.${call.method}`)) {
+      if (call.service.includes('@') && !Object.hasOwn(positionalServiceMethods, `${call.service}.${call.method}`)) {
         throw new BridgeError('INVALID_PAYLOAD', `service.call ${call.service}.${call.method} does not accept positional params`)
       }
       args = call.params
