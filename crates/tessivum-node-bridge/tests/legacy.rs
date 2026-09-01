@@ -132,7 +132,7 @@ fn real_host_runs_function_object_class_service_inject_events_waterfall_and_asyn
     let node_api = client
         .request(
             FrameKind::ServiceCall,
-            json!({ "name": "legacy.function", "method": "inspect", "args": ["node-api"] }),
+            json!({ "service": "legacy.function", "method": "inspect", "params": ["node-api"] }),
             Duration::from_secs(1),
         )
         .expect("function plugin exposes a service through the host");
@@ -159,7 +159,7 @@ fn real_host_runs_function_object_class_service_inject_events_waterfall_and_asyn
         client
             .request(
                 FrameKind::ServiceCall,
-                json!({ "name": "legacy.function", "method": "events" }),
+                json!({ "service": "legacy.function", "method": "events", "params": [] }),
                 Duration::from_secs(1),
             )
             .expect("event state remains available through service proxy"),
@@ -193,7 +193,7 @@ fn real_host_runs_function_object_class_service_inject_events_waterfall_and_asyn
         client
             .request(
                 FrameKind::ServiceCall,
-                json!({ "name": "legacy.object", "method": "echo", "args": ["object-value"] }),
+                json!({ "service": "legacy.object", "method": "echo", "params": ["object-value"] }),
                 Duration::from_secs(1),
             )
             .expect("object plugin exports its service"),
@@ -220,7 +220,7 @@ fn real_host_runs_function_object_class_service_inject_events_waterfall_and_asyn
         client
             .request(
                 FrameKind::ServiceCall,
-                json!({ "name": "legacy.class", "method": "required" }),
+                json!({ "service": "legacy.class", "method": "required", "params": [] }),
                 Duration::from_secs(1),
             )
             .expect("class injection observes its required service"),
@@ -237,7 +237,7 @@ fn real_host_runs_function_object_class_service_inject_events_waterfall_and_asyn
         client
             .request(
                 FrameKind::ServiceCall,
-                json!({ "name": "legacy.bridge", "method": "inspect", "args": ["service"] }),
+                json!({ "service": "legacy.bridge", "method": "inspect", "params": ["service"] }),
                 Duration::from_secs(1),
             )
             .expect("Cordis Service subclass remains callable"),

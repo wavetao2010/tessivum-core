@@ -7,8 +7,9 @@ Tessivum Core has two independent, exact-version wire contracts:
 | WASM plugin ABI | `cordis.plugin/v1` | Extism host ↔ guest |
 | Legacy Node bridge | `cordis.node/v1` | Rust bridge ↔ Bun compat-host |
 
-A service contract is versioned separately as `service-name@contract-version`.
-Neither wire version substitutes for a service contract version.
+`DomainBridge` owns Rust product services, whose contracts are versioned separately
+as `service-name@contract-version`. Node-provided Cordis plugin services are not
+DomainBridge identifiers.
 
 ## `cordis.plugin/v1` (Extism/WASM)
 
@@ -208,8 +209,8 @@ aborts it and returns `CANCELLED` if it has not already settled.
 
 ### Operation payloads
 
-The bridge transports JSON values. The compat-host accepts these operation
-shapes; fields shown as alternatives are accepted for direct callers, while
+The bridge transports JSON values. `service.call` has one strict canonical shape;
+other rows retain their noted direct-caller alternatives, while
 `LegacyNodeRuntime` uses the first form below.
 
 | Kind | Required payload |
@@ -218,13 +219,23 @@ shapes; fields shown as alternatives are accepted for direct callers, while
 | `plugin.update` | `{ "pluginId": "...", "config": <JSON> }` |
 | `plugin.dispose` | `{ "pluginId": "..." }` |
 | `plugin.snapshot` | `{ "pluginId": "..." }` (or `{ "loader": true }`) |
-| `service.call` | `{ "name" or "service": "...", "method"?: "...", "args"?: [] }` |
+| `service.call` | `{ "service": "...", "method": "...", "params": <object or array> }` |
 | `service.provide` | `{ "name" or "service": "...", "registrationId"?: "...", "value"?: <JSON> }` |
 | `service.remove` | `{ "registrationId" or "id": "..." }`, or a service name from which the default registration ID is derived |
 | `event.subscribe` | `{ "event" or "name": "...", "callbackId": "...", "registrationId"?: "...", "options"?: <object> }` |
 | `event.emit` | `{ "event" or "name": "...", "mode"?: "emit\|parallel\|serial\|bail\|waterfall", "args"?: [], "next"?: <JSON>, "result"?: <JSON> }` |
 | `event.callback` | `{ "callbackId": "...", "args"?: [] }` |
 | `registration.dispose` | `{ "registrationId" or "id": "..." }` |
+
+`service.call` requires all three fields and rejects unknown fields and the legacy
+`name`, `args`, and `serviceId` aliases. Generic Node-provided Cordis services
+use any nonblank bounded service name, such as `legacy.function`; only
+DomainBridge's Rust-owned product services use versioned identifiers such as
+`sessions@1`.
+
+`params` is the invocation argument: an object is passed as one argument. An
+array is positional only for existing explicitly positional Node-local service
+methods (including an empty array for no arguments).
 
 For `plugin.load`, an absolute, `file:`, or relative `package.location` is used
 as an import target; otherwise the package specifier is imported. The host

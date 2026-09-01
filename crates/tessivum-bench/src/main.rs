@@ -528,9 +528,9 @@ fn benchmark_node_warm(samples: usize, options: &Options, root: &Path) -> Result
                     .request(
                         FrameKind::ServiceCall,
                         json!({
-                            "name": "legacy.function",
+                            "service": "legacy.function",
                             "method": "inspect",
-                            "args": ["warm"],
+                            "params": ["warm"],
                         }),
                         NODE_REQUEST_TIMEOUT,
                     )
@@ -578,9 +578,9 @@ fn benchmark_node_batch(
                             .begin_request(
                                 FrameKind::ServiceCall,
                                 json!({
-                                    "name": "legacy.function",
+                                    "service": "legacy.function",
                                     "method": "inspect",
-                                    "args": [format!("{request_index}-{item}")],
+                                    "params": [format!("{request_index}-{item}")],
                                 }),
                             )
                             .map_err(|error| error.to_string())?,
