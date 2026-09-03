@@ -3,7 +3,7 @@ import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 const workloadSchema = 'tessivum.core-benchmark-workload/v1' as const
-const runtimeSchema = 'tessivum.core-benchmark-runtime/v1' as const
+const runtimeSchema = 'tessivum.core-benchmark-runtime/v2' as const
 const maxSamples = 100
 
 type Workload = {
@@ -356,12 +356,12 @@ async function selfPssKiB() {
   return value
 }
 
-async function processPssPeak(Context: CordisConstructor, scopes: number) {
+async function processPssLive(Context: CordisConstructor, scopes: number) {
   const { root, owner, children } = await createOwnedTree(Context, scopes)
-  const peak = await selfPssKiB()
+  const live = await selfPssKiB()
   await owner.dispose()
   assertNoResidue(root, children)
-  return peak
+  return live
 }
 
 async function processPssResidue(Context: CordisConstructor, scopes: number) {
@@ -393,11 +393,11 @@ async function run(options: Options) {
     summarize('service_lookup', 'operations/s', workload.serviceLookups, await collect(options.samples, () => serviceLookup(Context, workload.serviceLookups))),
     summarize('event_emit', 'operations/s', workload.eventEmits, await collect(options.samples, () => eventEmit(Context, workload.eventEmits))),
     summarize('loader_load', 'ns', workload.loaderEntries, await collect(options.samples, () => loaderLoad(Context, Loader, workload.loaderEntries))),
-    summarize('loader_update', 'ns', workload.loaderEntries, await collect(options.samples, () => loaderUpdate(Context, Loader, workload.loaderEntries))),
+    summarize('loader_update', 'ns', 1, await collect(options.samples, () => loaderUpdate(Context, Loader, workload.loaderEntries))),
     summarize('root_dispose', 'ns', workload.rootChildren, await collect(options.samples, () => rootDispose(Context, workload.rootChildren))),
     pssAvailable
-      ? summarize('process_pss_peak', 'KiB', workload.scopes, await collect(options.samples, () => processPssPeak(Context, workload.scopes)))
-      : unavailable('process_pss_peak', 'KiB', workload.scopes, pssNote),
+      ? summarize('process_pss_live', 'KiB', workload.scopes, await collect(options.samples, () => processPssLive(Context, workload.scopes)))
+      : unavailable('process_pss_live', 'KiB', workload.scopes, pssNote),
     pssAvailable
       ? summarize('process_pss_residue', 'KiB', workload.scopes, await collect(options.samples, () => processPssResidue(Context, workload.scopes)))
       : unavailable('process_pss_residue', 'KiB', workload.scopes, pssNote),

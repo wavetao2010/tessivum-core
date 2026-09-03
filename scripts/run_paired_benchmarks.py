@@ -16,8 +16,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-RUNTIME_SCHEMA = "tessivum.core-benchmark-runtime/v1"
-PAIRED_SCHEMA = "tessivum.core-benchmark-paired/v1"
+RUNTIME_SCHEMA = "tessivum.core-benchmark-runtime/v2"
+PAIRED_SCHEMA = "tessivum.core-benchmark-paired/v2"
 WORKLOAD_SCHEMA = "tessivum.core-benchmark-workload/v1"
 SAMPLE_TIMEOUT_SECONDS = 120
 CLEANUP_TIMEOUT_SECONDS = 5
@@ -28,7 +28,7 @@ EXPECTED_CASES = (
     ("loader_load", "ns", "loaderEntries"),
     ("loader_update", "ns", "loaderEntries"),
     ("root_dispose", "ns", "rootChildren"),
-    ("process_pss_peak", "KiB", "scopes"),
+    ("process_pss_live", "KiB", "scopes"),
     ("process_pss_residue", "KiB", "scopes"),
     ("residue_after_dispose", "count", "scopes"),
 )
@@ -207,7 +207,7 @@ def run_process(command: list[str], cwd: Path, environment: dict[str, str], time
     }
 
 
-def revision(path: Path) -> dict[str, Any]:
+def revision(path: Path, tracked_path: str | None = None) -> dict[str, Any]:
     command = ["git", "-C", str(path), "rev-parse", "--verify", "HEAD"]
     execution = run_process(command, path.parent, dict(os.environ), timeout=10)
     result: dict[str, Any] = {"command": command, "path": str(path)}
@@ -222,7 +222,15 @@ def revision(path: Path) -> dict[str, Any]:
     if not value:
         result["error"] = {"message": "git rev-parse returned no revision"}
         return result
-    result["value"] = value
+    status_command = ["git", "-C", str(path), "status", "--porcelain=v1", "--untracked-files=no", *(["--", tracked_path] if tracked_path else [])]
+    status = run_process(status_command, path.parent, dict(os.environ), timeout=10)
+    if status["timedOut"] or status["exitCode"] != 0 or status["survivingDescendants"] or status.get("spawnError"):
+        result["error"] = {"message": "git status failed", "detail": status}
+        return result
+    if status["stdout"].strip():
+        result["error"] = {"message": "repository has tracked changes", "paths": status["stdout"].splitlines()}
+        return result
+    result.update({"value": value, "clean": True})
     return result
 
 
@@ -235,7 +243,7 @@ def collect_revisions(core_root: Path) -> tuple[dict[str, str], list[dict[str, A
     values: dict[str, str] = {}
     failures: list[dict[str, Any]] = []
     for name, path in roots.items():
-        result = revision(path)
+        result = revision(path, "vendor" if name == "dsh" else None)
         if "value" in result:
             values[name] = result["value"]
         else:
@@ -297,7 +305,7 @@ def collect_tool_versions(cwd: Path, environment: dict[str, str], bun: str) -> d
 
 
 def expected_operations(workload: dict[str, Any]) -> dict[str, int]:
-    return {name: workload[field] for name, _unit, field in EXPECTED_CASES}
+    return {name: 1 if name == "loader_update" else workload[field] for name, _unit, field in EXPECTED_CASES}
 
 
 def validate_driver_report(
@@ -349,7 +357,7 @@ def validate_driver_report(
             errors.append(f"{name} operationsPerSample must be {operations[name]}")
         samples = benchmark.get("samples")
         if benchmark.get("status") == "unavailable":
-            if sys.platform == "linux" or name not in {"process_pss_peak", "process_pss_residue"}:
+            if sys.platform == "linux" or name not in {"process_pss_live", "process_pss_residue"}:
                 errors.append(f"{name} is unavailable")
             elif samples != [] or any(benchmark.get(field) is not None for field in ("median", "p95", "min", "max")) or not isinstance(benchmark.get("note"), str):
                 errors.append(f"{name} unavailable result must contain empty samples, null summaries, and a note")
@@ -483,7 +491,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                     unit,
                     operations[name],
                     samples[runtime][name],
-                    sys.platform != "linux" and name in {"process_pss_peak", "process_pss_residue"},
+                    sys.platform != "linux" and name in {"process_pss_live", "process_pss_residue"},
                 )
                 for name, unit, _field in EXPECTED_CASES
             ],
@@ -495,7 +503,7 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         for runtime in ("rust", "typescript")
         for name, _unit, _field in EXPECTED_CASES
         if len(samples[runtime][name]) != args.samples
-        and not (sys.platform != "linux" and name in {"process_pss_peak", "process_pss_residue"})
+        and not (sys.platform != "linux" and name in {"process_pss_live", "process_pss_residue"})
     ]
     if incomplete:
         failures.append({"stage": "aggregation", "reason": "publication requires exactly N successful process-cold samples per runtime and case", "incomplete": incomplete})

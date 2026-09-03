@@ -371,13 +371,13 @@ fn run_paired(options: &Options, workload: PairedWorkload) -> Result<Value, Stri
         benchmark_paired_loader_load(options.samples, workload)?,
         benchmark_paired_loader_update(options.samples, workload)?,
         benchmark_paired_root_dispose(options.samples, workload)?,
-        benchmark_paired_process_pss_peak(options.samples, workload)?,
+        benchmark_paired_process_pss_live(options.samples, workload)?,
         benchmark_paired_process_pss_residue(options.samples, workload)?,
         benchmark_paired_residue_after_dispose(options.samples, workload)?,
     ];
 
     Ok(json!({
-        "schema": "tessivum.core-benchmark-runtime/v1",
+        "schema": "tessivum.core-benchmark-runtime/v2",
         "runtime": {
             "name": "tessivum-core",
             "implementation": "rust",
@@ -590,7 +590,7 @@ fn benchmark_paired_root_dispose(
 }
 
 #[cfg(target_os = "linux")]
-fn benchmark_paired_process_pss_peak(
+fn benchmark_paired_process_pss_live(
     samples: usize,
     workload: PairedWorkload,
 ) -> Result<Value, String> {
@@ -602,7 +602,7 @@ fn benchmark_paired_process_pss_peak(
         dispose_root(&root)?;
     }
     summarize(
-        "process_pss_peak",
+        "process_pss_live",
         "KiB",
         workload.scopes,
         values,
@@ -611,11 +611,11 @@ fn benchmark_paired_process_pss_peak(
 }
 
 #[cfg(not(target_os = "linux"))]
-fn benchmark_paired_process_pss_peak(
+fn benchmark_paired_process_pss_live(
     _samples: usize,
     workload: PairedWorkload,
 ) -> Result<Value, String> {
-    unavailable_paired_pss("process_pss_peak", workload.scopes)
+    unavailable_paired_pss("process_pss_live", workload.scopes)
 }
 
 #[cfg(target_os = "linux")]
@@ -1237,7 +1237,7 @@ fn benchmark_loader_update(samples: usize) -> Result<Value, String> {
         disposed?;
         values.push(nanoseconds(elapsed)?);
     }
-    summarize("loader_update", "ns", LOADER_ENTRIES, values, None)
+    summarize("loader_update", "ns", 1, values, None)
 }
 
 fn new_loader() -> Result<Loader, String> {
