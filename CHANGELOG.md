@@ -18,6 +18,15 @@ independently of crate/repository releases.
   Browser `AbortSignal` cancellation through Legacy service and command calls;
   late replies cannot reopen a cancelled request.
 
+### Benchmark evidence
+
+- Add a frozen shared-workload, process-cold comparison between
+  `tessivum-core` and the pinned TypeScript Cordis `4.0.1` oracle, including
+  Loader update, root disposal, Linux PSS, and post-disposal residue cases.
+- Preserve non-Linux PSS as explicit unavailable data rather than fabricated
+  zero values; retain raw successes, failures, environment facts, revisions,
+  commands, median, p95, min, and max.
+
 ## 0.1.5 — 2026-08-28
 
 ### Legacy Node compatibility host

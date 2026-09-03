@@ -36,12 +36,24 @@ const MAX_BATCH: usize = 1_024;
 const LOADER_ENTRIES: usize = 16;
 const ROOT_CHILDREN: usize = 32;
 const NODE_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+const PAIRED_WORKLOAD_SCHEMA: &str = "tessivum.core-benchmark-workload/v1";
 
 struct Options {
     samples: usize,
     batch: usize,
-    wasm: PathBuf,
+    wasm: Option<PathBuf>,
     node_host: PathBuf,
+    paired_only: bool,
+    workload: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy)]
+struct PairedWorkload {
+    scopes: usize,
+    service_lookups: usize,
+    event_emits: usize,
+    loader_entries: usize,
+    root_children: usize,
 }
 
 struct ThreadWake(thread::Thread);
@@ -137,6 +149,8 @@ fn parse_options() -> Result<Options, String> {
     let mut batch = DEFAULT_BATCH;
     let mut wasm = None;
     let mut node_host = PathBuf::from("bun");
+    let mut paired_only = false;
+    let mut workload = None;
     let mut arguments = std::env::args_os().skip(1);
 
     while let Some(argument) = arguments.next() {
@@ -156,9 +170,13 @@ fn parse_options() -> Result<Options, String> {
             "--node-host" => {
                 node_host = PathBuf::from(next_argument(&mut arguments, "--node-host")?);
             }
+            "--paired-only" => paired_only = true,
+            "--workload" => {
+                workload = Some(PathBuf::from(next_argument(&mut arguments, "--workload")?));
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run -p tessivum-bench --release -- --wasm <guest.wasm> [--samples 1..{MAX_SAMPLES}] [--batch 1..{MAX_BATCH}] [--node-host bun]"
+                    "Usage:\n  cargo run -p tessivum-bench --release -- --wasm <guest.wasm> [--samples 1..{MAX_SAMPLES}] [--batch 1..{MAX_BATCH}] [--node-host bun]\n  cargo run -p tessivum-bench --release -- --paired-only --workload <workload.json> [--samples 1..{MAX_SAMPLES}]"
                 );
                 process::exit(0);
             }
@@ -170,6 +188,25 @@ fn parse_options() -> Result<Options, String> {
         }
     }
 
+    if paired_only {
+        let workload =
+            workload.ok_or_else(|| "--paired-only requires --workload <path>".to_owned())?;
+        if !workload.is_file() {
+            return Err(format!("workload does not exist: {}", workload.display()));
+        }
+        return Ok(Options {
+            samples,
+            batch,
+            wasm,
+            node_host,
+            paired_only,
+            workload: Some(workload),
+        });
+    }
+
+    if workload.is_some() {
+        return Err("--workload requires --paired-only".to_owned());
+    }
     let wasm = wasm.ok_or_else(|| "--wasm must name the built Rust guest module".to_owned())?;
     if !wasm.is_file() {
         return Err(format!("WASM guest does not exist: {}", wasm.display()));
@@ -178,8 +215,10 @@ fn parse_options() -> Result<Options, String> {
     Ok(Options {
         samples,
         batch,
-        wasm,
+        wasm: Some(wasm),
         node_host,
+        paired_only,
+        workload,
     })
 }
 
@@ -211,8 +250,22 @@ fn parse_bounded_argument(
 }
 
 fn run(options: Options) -> Result<Value, String> {
-    let wasm = std::fs::read(&options.wasm)
-        .map_err(|error| format!("cannot read {}: {error}", options.wasm.display()))?;
+    if options.paired_only {
+        let workload = load_paired_workload(
+            options
+                .workload
+                .as_deref()
+                .ok_or_else(|| "--paired-only requires --workload <path>".to_owned())?,
+        )?;
+        return run_paired(&options, workload);
+    }
+
+    let wasm_path = options
+        .wasm
+        .as_deref()
+        .ok_or_else(|| "--wasm must name the built Rust guest module".to_owned())?;
+    let wasm = std::fs::read(wasm_path)
+        .map_err(|error| format!("cannot read {}: {error}", wasm_path.display()))?;
     let root = workspace_root()?;
     let mut benchmarks = Vec::new();
 
@@ -251,6 +304,467 @@ fn run(options: Options) -> Result<Value, String> {
         },
         "benchmarks": benchmarks,
     }))
+}
+fn load_paired_workload(path: &Path) -> Result<PairedWorkload, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("cannot read workload {}: {error}", path.display()))?;
+    let value: Value = serde_json::from_str(&source)
+        .map_err(|error| format!("invalid workload JSON {}: {error}", path.display()))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "paired workload must be a JSON object".to_owned())?;
+    for key in object.keys() {
+        if !matches!(
+            key.as_str(),
+            "schema"
+                | "scopes"
+                | "serviceLookups"
+                | "eventEmits"
+                | "loaderEntries"
+                | "rootChildren"
+        ) {
+            return Err(format!("paired workload has unexpected field {key:?}"));
+        }
+    }
+    if object.get("schema").and_then(Value::as_str) != Some(PAIRED_WORKLOAD_SCHEMA) {
+        return Err(format!(
+            "paired workload schema must be {PAIRED_WORKLOAD_SCHEMA:?}"
+        ));
+    }
+
+    Ok(PairedWorkload {
+        scopes: paired_workload_count(object, "scopes", 1000)?,
+        service_lookups: paired_workload_count(object, "serviceLookups", 256)?,
+        event_emits: paired_workload_count(object, "eventEmits", 256)?,
+        loader_entries: paired_workload_count(object, "loaderEntries", LOADER_ENTRIES)?,
+        root_children: paired_workload_count(object, "rootChildren", ROOT_CHILDREN)?,
+    })
+}
+
+fn paired_workload_count(
+    object: &serde_json::Map<String, Value>,
+    field: &str,
+    expected: usize,
+) -> Result<usize, String> {
+    let value = object
+        .get(field)
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("paired workload {field} must be an integer"))?;
+    let value = usize::try_from(value)
+        .map_err(|_| format!("paired workload {field} exceeds platform usize"))?;
+    if value != expected {
+        return Err(format!(
+            "paired workload {field} must be the frozen value {expected}"
+        ));
+    }
+    Ok(value)
+}
+
+fn run_paired(options: &Options, workload: PairedWorkload) -> Result<Value, String> {
+    let core_root = workspace_root()?;
+    let core_revision = repository_revision(&core_root)?;
+    let revisions = paired_revisions(&core_root, &core_revision)?;
+    let benchmarks = vec![
+        benchmark_paired_scope_create_dispose(options.samples, workload)?,
+        benchmark_paired_service_lookup(options.samples, workload)?,
+        benchmark_paired_event_emit(options.samples, workload)?,
+        benchmark_paired_loader_load(options.samples, workload)?,
+        benchmark_paired_loader_update(options.samples, workload)?,
+        benchmark_paired_root_dispose(options.samples, workload)?,
+        benchmark_paired_process_pss_peak(options.samples, workload)?,
+        benchmark_paired_process_pss_residue(options.samples, workload)?,
+        benchmark_paired_residue_after_dispose(options.samples, workload)?,
+    ];
+
+    Ok(json!({
+        "schema": "tessivum.core-benchmark-runtime/v1",
+        "runtime": {
+            "name": "tessivum-core",
+            "implementation": "rust",
+            "version": tessivum_core::VERSION,
+            "revision": core_revision,
+            "profile": build_profile(),
+        },
+        "revisions": revisions,
+        "workload": paired_workload_json(workload),
+        "environment": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "uname": command_output("uname", ["-a"]),
+            "rust": command_output("rustc", ["--version"]),
+        },
+        "benchmarks": benchmarks,
+        "diagnostics": {
+            "processPss": paired_process_pss_diagnostic(),
+        },
+    }))
+}
+
+fn paired_workload_json(workload: PairedWorkload) -> Value {
+    json!({
+        "schema": PAIRED_WORKLOAD_SCHEMA,
+        "scopes": workload.scopes,
+        "serviceLookups": workload.service_lookups,
+        "eventEmits": workload.event_emits,
+        "loaderEntries": workload.loader_entries,
+        "rootChildren": workload.root_children,
+    })
+}
+
+fn paired_revisions(core_root: &Path, core_revision: &str) -> Result<Value, String> {
+    let checkout_root = core_root
+        .parent()
+        .ok_or_else(|| "tessivum-core checkout has no parent directory".to_owned())?;
+    Ok(json!({
+        "product": repository_revision(&checkout_root.join("tessivum"))?,
+        "core": core_revision,
+        "dsh": repository_revision(&checkout_root.join("upstream/deepseek-harness"))?,
+    }))
+}
+
+fn repository_revision(path: &Path) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|error| format!("cannot read revision for {}: {error}", path.display()))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cannot read revision for {}: git exited {}",
+            path.display(),
+            output
+                .status
+                .code()
+                .map_or_else(|| "from signal".to_owned(), |code| code.to_string())
+        ));
+    }
+    let revision = String::from_utf8(output.stdout)
+        .map_err(|error| format!("revision for {} is not UTF-8: {error}", path.display()))?;
+    let revision = revision.trim();
+    if revision.is_empty() {
+        return Err(format!("revision for {} is empty", path.display()));
+    }
+    Ok(revision.to_owned())
+}
+
+fn benchmark_paired_scope_create_dispose(
+    samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let root = ContextHandle::root();
+        let start = Instant::now();
+        create_paired_children(&root, workload.scopes)?;
+        dispose_root(&root)?;
+        values.push(nanoseconds(start.elapsed())?);
+    }
+    summarize("scope_create_dispose", "ns", workload.scopes, values, None)
+}
+
+fn create_paired_children(root: &ContextHandle, scopes: usize) -> Result<(), String> {
+    for _ in 0..scopes {
+        black_box(root.child().map_err(|error| error.to_string())?);
+    }
+    Ok(())
+}
+
+fn benchmark_paired_service_lookup(
+    samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    let service = tessivum_core::ServiceKey::new("benchmark.paired.service", "core/v1");
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let root = ContextHandle::root();
+        root.provide(service.clone(), 42_u64)
+            .map_err(|error| error.to_string())?;
+        let child = root.child().map_err(|error| error.to_string())?;
+        let start = Instant::now();
+        let looked_up = (|| -> Result<(), String> {
+            for _ in 0..workload.service_lookups {
+                let handle = child
+                    .get::<u64>(&service)
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "paired benchmark inherited service disappeared".to_owned())?;
+                black_box(
+                    handle
+                        .with(|value| *value)
+                        .map_err(|error| error.to_string())?,
+                );
+            }
+            Ok(())
+        })();
+        let elapsed = start.elapsed();
+        let disposed = dispose_root(&root);
+        looked_up?;
+        disposed?;
+        values.push(operations_per_second(workload.service_lookups, elapsed)?);
+    }
+    summarize(
+        "service_lookup",
+        "operations/s",
+        workload.service_lookups,
+        values,
+        None,
+    )
+}
+
+fn benchmark_paired_event_emit(samples: usize, workload: PairedWorkload) -> Result<Value, String> {
+    let key = EventKey::<u64>::new("benchmark.paired.event");
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let root = ContextHandle::root();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&seen);
+        let events = root.events();
+        events
+            .on(
+                &root.scope(),
+                key.clone(),
+                EventOptions::default(),
+                move |_| {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    Ok(Value::Null)
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        let start = Instant::now();
+        let emitted = (|| -> Result<(), String> {
+            for value in 0..workload.event_emits {
+                events
+                    .emit(&key, &(value as u64))
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })();
+        let elapsed = start.elapsed();
+        let observed = seen.load(Ordering::Relaxed);
+        let disposed = dispose_root(&root);
+        emitted?;
+        disposed?;
+        if observed != workload.event_emits {
+            return Err(format!(
+                "paired event listener saw {observed} of {} events",
+                workload.event_emits
+            ));
+        }
+        values.push(operations_per_second(workload.event_emits, elapsed)?);
+    }
+    summarize(
+        "event_emit",
+        "operations/s",
+        workload.event_emits,
+        values,
+        None,
+    )
+}
+
+fn benchmark_paired_loader_load(samples: usize, workload: PairedWorkload) -> Result<Value, String> {
+    debug_assert_eq!(workload.loader_entries, LOADER_ENTRIES);
+    benchmark_loader_load(samples, "loader_load")
+}
+
+fn benchmark_paired_loader_update(
+    samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    debug_assert_eq!(workload.loader_entries, LOADER_ENTRIES);
+    benchmark_loader_update(samples)
+}
+
+fn benchmark_paired_root_dispose(
+    samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let root = ContextHandle::root();
+        create_paired_children(&root, workload.root_children)?;
+        let start = Instant::now();
+        dispose_root(&root)?;
+        values.push(nanoseconds(start.elapsed())?);
+    }
+    summarize("root_dispose", "ns", workload.root_children, values, None)
+}
+
+#[cfg(target_os = "linux")]
+fn benchmark_paired_process_pss_peak(
+    samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let root = ContextHandle::root();
+        create_paired_children(&root, workload.scopes)?;
+        values.push(self_pss_kib()?);
+        dispose_root(&root)?;
+    }
+    summarize(
+        "process_pss_peak",
+        "KiB",
+        workload.scopes,
+        values,
+        Some("Linux self PSS from /proc/self/smaps_rollup while child scopes are live"),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn benchmark_paired_process_pss_peak(
+    _samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    unavailable_paired_pss("process_pss_peak", workload.scopes)
+}
+
+#[cfg(target_os = "linux")]
+fn benchmark_paired_process_pss_residue(
+    samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let root = ContextHandle::root();
+        create_paired_children(&root, workload.scopes)?;
+        dispose_root(&root)?;
+        values.push(self_pss_kib()?);
+    }
+    summarize(
+        "process_pss_residue",
+        "KiB",
+        workload.scopes,
+        values,
+        Some("Linux self PSS from /proc/self/smaps_rollup after root disposal"),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn benchmark_paired_process_pss_residue(
+    _samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    unavailable_paired_pss("process_pss_residue", workload.scopes)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn unavailable_paired_pss(name: &str, operations: usize) -> Result<Value, String> {
+    Ok(json!({
+        "name": name,
+        "unit": "KiB",
+        "operationsPerSample": operations,
+        "samples": [],
+        "median": Value::Null,
+        "p95": Value::Null,
+        "min": Value::Null,
+        "max": Value::Null,
+        "status": "unavailable",
+        "note": "Linux /proc/self/smaps_rollup is unavailable on this target",
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn self_pss_kib() -> Result<u64, String> {
+    let source = std::fs::read_to_string("/proc/self/smaps_rollup")
+        .map_err(|error| format!("cannot read /proc/self/smaps_rollup: {error}"))?;
+    let value = source
+        .lines()
+        .find_map(|line| line.strip_prefix("Pss:"))
+        .ok_or_else(|| "/proc/self/smaps_rollup has no Pss field".to_owned())?;
+    let mut fields = value.split_whitespace();
+    let kib = fields
+        .next()
+        .ok_or_else(|| "/proc/self/smaps_rollup Pss field has no value".to_owned())?
+        .parse::<u64>()
+        .map_err(|error| format!("invalid /proc/self/smaps_rollup Pss value: {error}"))?;
+    if fields.next() != Some("kB") || fields.next().is_some() {
+        return Err("invalid /proc/self/smaps_rollup Pss unit".to_owned());
+    }
+    Ok(kib)
+}
+
+fn benchmark_paired_residue_after_dispose(
+    samples: usize,
+    workload: PairedWorkload,
+) -> Result<Value, String> {
+    let service = tessivum_core::ServiceKey::new("benchmark.paired.residue", "core/v1");
+    let event = EventKey::<u64>::new("benchmark.paired.residue");
+    let mut values = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let root = ContextHandle::root();
+        let mut children = Vec::with_capacity(workload.scopes);
+        for _ in 0..workload.scopes {
+            let child = root.child().map_err(|error| error.to_string())?;
+            children.push(child.scope());
+        }
+        let provider = root
+            .provide(service.clone(), 42_u64)
+            .map_err(|error| error.to_string())?;
+        let consumer = root
+            .get::<u64>(&service)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "paired residue service was not provided".to_owned())?;
+        let seen = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&seen);
+        let events = root.events();
+        events
+            .on(
+                &root.scope(),
+                event.clone(),
+                EventOptions::default(),
+                move |_| {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                    Ok(Value::Null)
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        dispose_root(&root)?;
+
+        let mut residue = usize::from(root.scope().state() != tessivum_core::FiberState::Disposed);
+        residue += children
+            .iter()
+            .filter(|scope| scope.state() != tessivum_core::FiberState::Disposed)
+            .count();
+        residue += root.snapshots().len();
+        residue += usize::from(
+            root.get::<u64>(&service)
+                .map_err(|error| error.to_string())?
+                .is_some(),
+        );
+        residue += usize::from(provider.with(|value| *value).is_ok());
+        residue += usize::from(consumer.with(|value| *value).is_ok());
+        residue += usize::from(root.child().is_ok());
+        events
+            .emit(&event, &0_u64)
+            .map_err(|error| error.to_string())?;
+        residue += seen.load(Ordering::Relaxed);
+        if residue != 0 {
+            return Err(format!(
+                "paired disposal left {residue} observable residues"
+            ));
+        }
+        values.push(0);
+    }
+    summarize(
+        "residue_after_dispose",
+        "count",
+        workload.scopes,
+        values,
+        None,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn paired_process_pss_diagnostic() -> Value {
+    json!({ "status": "available", "source": "/proc/self/smaps_rollup" })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn paired_process_pss_diagnostic() -> Value {
+    json!({
+        "status": "unavailable",
+        "reason": "Linux /proc/self/smaps_rollup is unavailable on this target",
+    })
 }
 
 fn command_output<const N: usize>(program: &str, arguments: [&str; N]) -> String {
@@ -674,6 +1188,10 @@ fn dispose_legacy_plugin(
 }
 
 fn benchmark_loader_tree(samples: usize) -> Result<Value, String> {
+    benchmark_loader_load(samples, "loader_tree")
+}
+
+fn benchmark_loader_load(samples: usize, name: &str) -> Result<Value, String> {
     let mut values = Vec::with_capacity(samples);
     for _ in 0..samples {
         let mut loader = new_loader()?;
@@ -692,7 +1210,7 @@ fn benchmark_loader_tree(samples: usize) -> Result<Value, String> {
         disposed?;
         values.push(nanoseconds(elapsed)?);
     }
-    summarize("loader_tree", "ns", LOADER_ENTRIES, values, None)
+    summarize(name, "ns", LOADER_ENTRIES, values, None)
 }
 
 fn benchmark_loader_update(samples: usize) -> Result<Value, String> {
@@ -811,6 +1329,8 @@ fn summarize(
         "samples": samples,
         "median": median,
         "p95": sorted[p95_index],
+        "min": sorted[0],
+        "max": sorted[sorted.len() - 1],
     });
     if let Some(note) = note {
         result["note"] = Value::String(note.to_owned());

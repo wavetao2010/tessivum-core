@@ -1,4 +1,7 @@
 {
+  "status": "historical-noncomparative",
+  "publication": false,
+  "note": "Three-sample Rust-only Darwin record retained for regression history; not a paired or publishable result.",
   "abi": {
     "node": "cordis.node/v1",
     "wasm": "cordis.plugin/v1"

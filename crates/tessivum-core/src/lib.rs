@@ -38,6 +38,7 @@ pub use service::{
 };
 
 pub const SCHEMA_VERSION: &str = "tessivum.conformance/v1";
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

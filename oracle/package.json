@@ -7,6 +7,7 @@
     "typescript": "7.0.2"
   },
   "scripts": {
-    "oracle": "bun run src/index.ts"
+    "oracle": "bun run src/index.ts",
+    "paired": "bun run paired.ts"
   }
 }

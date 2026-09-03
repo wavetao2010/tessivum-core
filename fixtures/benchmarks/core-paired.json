@@ -1,0 +1,9 @@
+{
+  "schema": "tessivum.core-benchmark-workload/v1",
+  "scopes": 1000,
+  "serviceLookups": 256,
+  "eventEmits": 256,
+  "loaderEntries": 16,
+  "rootChildren": 32
+}
+

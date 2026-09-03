@@ -34,6 +34,31 @@ A Node request has a two-second request timeout. Host handshake and graceful
 shutdown each have a five-second timeout. The Node batch queue, loader tree,
 and root-disposal tree are also fixed-size and bounded by the executable.
 
+## Paired Cordis comparison
+
+`fixtures/benchmarks/core-paired.json` freezes the shared workload used by the
+Rust driver and the TypeScript Cordis `4.0.1` oracle. The paired runner starts a
+fresh process for every sample, alternates A/B launch order, rejects partial or
+misordered case sets, retains every failed run, and reports raw samples plus
+median, p95, min, and max:
+
+```sh
+cargo build --locked --release -p tessivum-bench
+python3 scripts/run_paired_benchmarks.py \
+  --rust-bin target/release/tessivum-bench \
+  --cordis-root ../upstream/deepseek-harness/vendor \
+  --workload fixtures/benchmarks/core-paired.json \
+  --samples 30 \
+  --raw-out core-paired.json
+```
+
+The paired cases are Scope create/dispose, Service lookup, Event emit,
+16-entry Loader load/update, 32-child root disposal, live and post-disposal
+process PSS, and observable residue after disposal. PSS is read only from Linux
+`/proc/self/smaps_rollup`; other platforms emit `status: "unavailable"` with no
+numeric substitute. Use `tessivum/benchmarks/run-linux-container.sh` for the
+pinned Ubuntu 24.04 environment and the full Core + product run.
+
 ## Measurements
 
 Every result has `name`, `unit`, `operationsPerSample`, raw `samples`,
