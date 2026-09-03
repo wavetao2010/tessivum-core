@@ -59,6 +59,32 @@ process PSS, and observable residue after disposal. PSS is read only from Linux
 numeric substitute. Use `tessivum/benchmarks/run-linux-container.sh` for the
 pinned Ubuntu 24.04 environment and the full Core + product run.
 
+## Published Alpha.23 result
+
+The checked-in [`BENCHMARK_RESULTS.json`](BENCHMARK_RESULTS.json) is the
+30-sample fixed Ubuntu 24.04 arm64 publication run from 2026-09-03. It compares
+tessivum-core commit `cedbeb9e1607056845b69e09b825eb7f5be67a69` with
+`@deepseek-ai/cordis` 4.0.1 at DeepSeek Harness commit
+`47f943859bef60e4160492346772ded9b24f765a`. SHA-256:
+`325f9b16352263f17d0b04b629cc22a1c6ec73adbde0eacb6882caf51485d69c`.
+
+| Workload | tessivum-core median / p95 | TypeScript Cordis median / p95 | Median result |
+|---|---:|---:|---:|
+| 1,000 scope create/dispose cycles | 0.834 / 0.882 ms | 20.021 / 28.363 ms | **24.02× faster** |
+| Service lookup | 23.362 / 24.002 M ops/s | 1.111 / 1.186 M ops/s | **21.03× throughput** |
+| Event emit | 10.723 / 12.118 M ops/s | 0.404 / 0.432 M ops/s | **26.54× throughput** |
+| Load 16 entries | 0.445 / 0.556 ms | 2.154 / 2.431 ms | **4.85× faster** |
+| Update 16 entries | 21.085 / 33.537 ms | 0.534 / 0.590 ms | **39.49× slower** |
+| Dispose root with 32 children | 0.069 / 0.081 ms | 0.217 / 0.250 ms | **3.15× faster** |
+| Peak process PSS | 4.59 / 4.59 MiB | 79.98 / 80.57 MiB | **17.43× lower** |
+| Live registrations after disposal | 0 / 0 | 0 / 0 | equal; no residue |
+
+The previous three-sample Rust-only Darwin record remains in
+[`BENCHMARK_RESULTS.historical.json`](BENCHMARK_RESULTS.historical.json) for
+audit history. It is non-comparative and must not be used as a public claim.
+The paired result does not measure complete products, LLM latency, quality or
+multi-user saturation.
+
 ## Measurements
 
 Every result has `name`, `unit`, `operationsPerSample`, raw `samples`,

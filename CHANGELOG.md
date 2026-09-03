@@ -26,6 +26,8 @@ independently of crate/repository releases.
 - Preserve non-Linux PSS as explicit unavailable data rather than fabricated
   zero values; retain raw successes, failures, environment facts, revisions,
   commands, median, p95, min, and max.
+- Publish the 30-sample fixed-Linux raw result and median/p95 comparison;
+  preserve the former three-sample Darwin record as explicitly historical.
 
 ## 0.1.5 — 2026-08-28
 

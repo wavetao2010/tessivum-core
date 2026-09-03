@@ -1,0 +1,165 @@
+{
+  "status": "historical-noncomparative",
+  "publication": false,
+  "note": "Three-sample Rust-only Darwin record retained for regression history; not a paired or publishable result.",
+  "abi": {
+    "node": "cordis.node/v1",
+    "wasm": "cordis.plugin/v1"
+  },
+  "recordedAt": "2026-08-24T12:21:09Z",
+  "repositoryVersion": "0.1.1",
+  "batchSize": 32,
+  "benchmarks": [
+    {
+      "median": 96,
+      "name": "context_fiber_memory_proxy",
+      "note": "shallow ContextHandle + Fiber layout; excludes allocator and Arc targets",
+      "operationsPerSample": 1,
+      "p95": 96,
+      "samples": [
+        96,
+        96,
+        96
+      ],
+      "unit": "bytes"
+    },
+    {
+      "median": 88333,
+      "name": "native_lifecycle",
+      "operationsPerSample": 1,
+      "p95": 117333,
+      "samples": [
+        117333,
+        87708,
+        88333
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 4986753,
+      "name": "service_lookup",
+      "operationsPerSample": 32,
+      "p95": 5907328,
+      "samples": [
+        1462857,
+        4986753,
+        5907328
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 3047619,
+      "name": "event_emit",
+      "operationsPerSample": 32,
+      "p95": 3979109,
+      "samples": [
+        2713704,
+        3047619,
+        3979109
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 2660625,
+      "name": "wasm_cold_call",
+      "operationsPerSample": 1,
+      "p95": 7379834,
+      "samples": [
+        7379834,
+        2583625,
+        2660625
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 5166,
+      "name": "wasm_warm_call",
+      "operationsPerSample": 1,
+      "p95": 10708,
+      "samples": [
+        10708,
+        5083,
+        5166
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 33523917,
+      "name": "node_bridge_cold",
+      "operationsPerSample": 1,
+      "p95": 181050583,
+      "samples": [
+        181050583,
+        33523917,
+        31276125
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 7075,
+      "name": "node_bridge_warm",
+      "operationsPerSample": 1,
+      "p95": 9195,
+      "samples": [
+        621,
+        7075,
+        9195
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 25939,
+      "name": "node_bridge_batch",
+      "operationsPerSample": 32,
+      "p95": 31079,
+      "samples": [
+        16659,
+        31079,
+        25939
+      ],
+      "unit": "operations/s"
+    },
+    {
+      "median": 165625,
+      "name": "loader_tree",
+      "operationsPerSample": 16,
+      "p95": 259292,
+      "samples": [
+        259292,
+        165625,
+        164042
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 853750,
+      "name": "loader_update",
+      "operationsPerSample": 16,
+      "p95": 864250,
+      "samples": [
+        853750,
+        864250,
+        841333
+      ],
+      "unit": "ns"
+    },
+    {
+      "median": 446166,
+      "name": "root_dispose",
+      "operationsPerSample": 32,
+      "p95": 452333,
+      "samples": [
+        446166,
+        452333,
+        443167
+      ],
+      "unit": "ns"
+    }
+  ],
+  "environment": {
+    "profile": "release",
+    "rust": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "uname": "Darwin MacBook-Pro.local 25.2.0 Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:49 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T8142 arm64"
+  },
+  "sampleCount": 3
+}
