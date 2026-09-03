@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -65,6 +66,11 @@ def parse_args() -> argparse.Namespace:
 def json_text(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
+
+
+def json_sha256(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 def is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
@@ -494,12 +500,15 @@ def run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     if incomplete:
         failures.append({"stage": "aggregation", "reason": "publication requires exactly N successful process-cold samples per runtime and case", "incomplete": incomplete})
 
+    environment_report = {**environment_manifest(environment), "tools": tool_versions}
     report = {
         "schema": PAIRED_SCHEMA,
         "status": "success" if not failures else "failure",
         "sampleCount": args.samples,
         "workload": workload,
-        "environment": {**environment_manifest(environment), "tools": tool_versions},
+        "environment": environment_report,
+        "environmentSha256": json_sha256(environment_report),
+        "workloadSha256": json_sha256(workload),
         "revisions": revisions,
         "commands": commands,
         "runtimes": aggregates,
