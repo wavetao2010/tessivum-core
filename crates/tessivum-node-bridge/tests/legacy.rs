@@ -22,6 +22,13 @@ use tessivum_node_bridge::{
 };
 
 static NEXT_RACE_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+static LEGACY_HOST_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn serialize_legacy_host_tests() -> std::sync::MutexGuard<'static, ()> {
+    LEGACY_HOST_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 struct ThreadWake(thread::Thread);
 
@@ -106,6 +113,7 @@ fn load(
 
 #[test]
 fn real_host_runs_function_object_class_service_inject_events_waterfall_and_async_disposers() {
+    let _host_guard = serialize_legacy_host_tests();
     let supervisor = NodeSupervisor::new(host_command(), ClientConfig::default())
         .expect("supervisor accepts a Bun host command");
     let client = supervisor.start().expect("real compat host handshakes");
@@ -292,6 +300,7 @@ fn real_host_runs_function_object_class_service_inject_events_waterfall_and_asyn
 
 #[test]
 fn loader_runtime_loads_and_unloads_a_real_function_plugin() {
+    let _host_guard = serialize_legacy_host_tests();
     struct Resolver;
 
     impl PackageResolver for Resolver {
@@ -382,6 +391,7 @@ fn loader_runtime_loads_and_unloads_a_real_function_plugin() {
 
 #[test]
 fn cancelled_loader_load_and_delayed_disposers_leave_no_stale_handles() {
+    let _host_guard = serialize_legacy_host_tests();
     let race_file = PathBuf::from(fixture_path(&format!(
         "tessivum-node-bridge-race-{}-{}.ts",
         std::process::id(),
@@ -738,6 +748,7 @@ export default function racePlugin(ctx: any, config: any = {}) {
 
 #[test]
 fn crash_cleans_generation_resources_restarts_the_host_and_rejects_stale_clients() {
+    let _host_guard = serialize_legacy_host_tests();
     let supervisor = NodeSupervisor::new(host_command(), ClientConfig::default())
         .expect("supervisor accepts a Bun host command");
     let stale = supervisor.start().expect("first real host handshakes");
