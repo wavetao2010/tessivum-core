@@ -1331,10 +1331,22 @@ fn resolve_program(program: &Path) -> BridgeResult<PathBuf> {
     }
     let path = std::env::var_os("PATH")
         .ok_or_else(|| BridgeError::Process("PATH is required to resolve the Node host".into()))?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| BridgeError::Process(format!("could not resolve Node host {program:?}")))
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(program);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        #[cfg(windows)]
+        if program.extension().is_none() {
+            let candidate = candidate.with_extension(std::env::consts::EXE_EXTENSION);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(BridgeError::Process(format!(
+        "could not resolve Node host {program:?}"
+    )))
 }
 
 #[cfg(unix)]
