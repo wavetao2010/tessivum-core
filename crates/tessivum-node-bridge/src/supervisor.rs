@@ -26,6 +26,7 @@ use tessivum_core::{
 use crate::protocol::{BridgeError, BridgeResult, Frame, FrameCodec, FrameKind, RemoteError};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BRIDGE_REQUEST_ID: u64 = 9_007_199_254_740_991;
 
 const MAX_STARTUP_STDERR_BYTES: usize = 4 * 1024;
@@ -157,7 +158,7 @@ impl Default for ClientConfig {
         Self {
             max_frame_size: crate::DEFAULT_MAX_FRAME_SIZE,
             queue_capacity: 64,
-            handshake_timeout: DEFAULT_TIMEOUT,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_TIMEOUT,
             shutdown_timeout: DEFAULT_TIMEOUT,
         }
