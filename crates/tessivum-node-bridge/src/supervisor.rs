@@ -26,13 +26,19 @@ use tessivum_core::{
 use crate::protocol::{BridgeError, BridgeResult, Frame, FrameCodec, FrameKind, RemoteError};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BRIDGE_REQUEST_ID: u64 = 9_007_199_254_740_991;
 
 const MAX_STARTUP_STDERR_BYTES: usize = 4 * 1024;
 
+#[derive(Clone)]
 struct StartupStderr {
-    output: Arc<Mutex<Vec<u8>>>,
-    done: Receiver<()>,
+    state: Arc<(Mutex<StderrState>, Condvar)>,
+}
+
+struct StderrState {
+    output: Vec<u8>,
+    done: bool,
 }
 
 impl StartupStderr {
@@ -40,9 +46,14 @@ impl StartupStderr {
     where
         R: Read + Send + 'static,
     {
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&output);
-        let (done_tx, done) = mpsc::sync_channel(1);
+        let state = Arc::new((
+            Mutex::new(StderrState {
+                output: Vec::new(),
+                done: false,
+            }),
+            Condvar::new(),
+        ));
+        let captured = Arc::clone(&state);
         thread::spawn(move || {
             let mut buffer = [0; 1024];
             loop {
@@ -52,19 +63,31 @@ impl StartupStderr {
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                     Err(_) => break,
                 };
-                let mut output = lock(&captured);
-                let remaining = MAX_STARTUP_STDERR_BYTES.saturating_sub(output.len());
-                output.extend_from_slice(&buffer[..count.min(remaining)]);
+                let mut state = lock(&captured.0);
+                let remaining = MAX_STARTUP_STDERR_BYTES.saturating_sub(state.output.len());
+                state
+                    .output
+                    .extend_from_slice(&buffer[..count.min(remaining)]);
             }
-            let _ = done_tx.send(());
+            let mut state = lock(&captured.0);
+            state.done = true;
+            captured.1.notify_all();
         });
-        Self { output, done }
+        Self { state }
     }
 
     fn attach(&self, error: BridgeError) -> BridgeError {
-        let _ = self.done.recv_timeout(Duration::from_millis(100));
-        let output = lock(&self.output);
-        let diagnostic = String::from_utf8_lossy(&output)
+        let state = lock(&self.state.0);
+        let state =
+            match self
+                .state
+                .1
+                .wait_timeout_while(state, Duration::from_millis(100), |state| !state.done)
+            {
+                Ok((state, _)) => state,
+                Err(error) => error.into_inner().0,
+            };
+        let diagnostic = String::from_utf8_lossy(&state.output)
             .trim()
             .escape_default()
             .to_string();
@@ -135,7 +158,7 @@ impl Default for ClientConfig {
         Self {
             max_frame_size: crate::DEFAULT_MAX_FRAME_SIZE,
             queue_capacity: 64,
-            handshake_timeout: DEFAULT_TIMEOUT,
+            handshake_timeout: DEFAULT_HANDSHAKE_TIMEOUT,
             request_timeout: DEFAULT_TIMEOUT,
             shutdown_timeout: DEFAULT_TIMEOUT,
         }
@@ -187,6 +210,7 @@ where
 }
 
 type DisconnectHandler = Arc<dyn Fn(BridgeError) + Send + Sync>;
+type DisconnectErrorContext = Arc<dyn Fn(BridgeError) -> BridgeError + Send + Sync>;
 type LogHandler = Arc<dyn Fn(Value) + Send + Sync>;
 type PendingReply = Sender<BridgeResult<Value>>;
 type Inbound = (Frame, Sender<()>);
@@ -201,6 +225,7 @@ struct ClientInner {
     next_request_id: AtomicU64,
     handler: Mutex<Option<Arc<dyn BridgeHandler>>>,
     on_disconnect: Mutex<Option<DisconnectHandler>>,
+    disconnect_error_context: Mutex<Option<DisconnectErrorContext>>,
     on_log: Mutex<Option<LogHandler>>,
     extensions: Mutex<BTreeSet<String>>,
     last_heartbeat: Mutex<Instant>,
@@ -242,6 +267,10 @@ impl ClientInner {
     }
 
     fn disconnect(&self, error: BridgeError) {
+        let error = match lock(&self.disconnect_error_context).clone() {
+            Some(context) => context(error),
+            None => error,
+        };
         let disconnect_handler = {
             let mut state = lock(&self.state);
             if matches!(&*state, ConnectionState::Disconnected(_)) {
@@ -496,6 +525,7 @@ impl BridgeClient {
             handler: Mutex::new(None),
             on_disconnect: Mutex::new(None),
             on_log: Mutex::new(None),
+            disconnect_error_context: Mutex::new(None),
             last_heartbeat: Mutex::new(Instant::now()),
             extensions: Mutex::new(BTreeSet::new()),
             cancellable_requests: Arc::new(Mutex::new(BTreeMap::new())),
@@ -541,6 +571,12 @@ impl BridgeClient {
         if let Some(error) = prior_error {
             handler(error);
         }
+    }
+    fn set_disconnect_error_context(
+        &self,
+        context: impl Fn(BridgeError) -> BridgeError + Send + Sync + 'static,
+    ) {
+        *lock(&self.inner.disconnect_error_context) = Some(Arc::new(context));
     }
 
     pub fn supports_extension(&self, extension: &str) -> bool {
@@ -816,9 +852,9 @@ fn spawn_dispatcher(inner: Arc<ClientInner>, receiver: Receiver<Inbound>) {
 
 /// A restartable command line for exactly one Node host profile.
 ///
-/// The child starts with an empty environment; [`HostCommand::env`] is its
-/// explicit allowlist. Unix hosts run in a dedicated process group. Windows
-/// hosts use a kill-on-close job object and fail startup if it cannot attach.
+/// The child receives only [`HostCommand::env`] plus OS variables required by
+/// the runtime. Unix hosts run in a dedicated process group. Windows hosts use
+/// a kill-on-close job object and fail startup if it cannot attach.
 #[derive(Clone)]
 pub struct HostCommand {
     pub program: PathBuf,
@@ -1089,9 +1125,12 @@ impl NodeSupervisor {
             command.current_dir(cwd);
         }
         configure_process_tree(&mut command);
+        command.args(&self.command.args).env_clear();
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
         command
-            .args(&self.command.args)
-            .env_clear()
             .envs(self.command.env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -1122,6 +1161,8 @@ impl NodeSupervisor {
                 return Err(error);
             }
         };
+        let disconnect_stderr = stderr.clone();
+        client.set_disconnect_error_context(move |error| disconnect_stderr.attach(error));
         let mut process = Some(ActiveProcess {
             generation,
             child,
@@ -1331,10 +1372,22 @@ fn resolve_program(program: &Path) -> BridgeResult<PathBuf> {
     }
     let path = std::env::var_os("PATH")
         .ok_or_else(|| BridgeError::Process("PATH is required to resolve the Node host".into()))?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join(program))
-        .find(|candidate| candidate.is_file())
-        .ok_or_else(|| BridgeError::Process(format!("could not resolve Node host {program:?}")))
+    for directory in std::env::split_paths(&path) {
+        let candidate = directory.join(program);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        #[cfg(windows)]
+        if program.extension().is_none() {
+            let candidate = candidate.with_extension(std::env::consts::EXE_EXTENSION);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Err(BridgeError::Process(format!(
+        "could not resolve Node host {program:?}"
+    )))
 }
 
 #[cfg(unix)]

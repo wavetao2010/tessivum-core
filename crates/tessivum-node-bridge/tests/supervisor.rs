@@ -1,20 +1,26 @@
 use std::{
-    fs,
-    io::Write,
-    os::unix::net::UnixStream,
     path::PathBuf,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        mpsc, Arc, Condvar, Mutex,
+        Arc,
     },
+    time::Duration,
+};
+
+#[cfg(unix)]
+use std::{
+    fs,
+    io::Write,
+    os::unix::net::UnixStream,
+    sync::{mpsc, Condvar, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use serde_json::json;
-use tessivum_node_bridge::{
-    BridgeClient, ClientConfig, Frame, FrameCodec, FrameKind, HostCommand, NodeSupervisor,
-};
+#[cfg(unix)]
+use tessivum_node_bridge::{BridgeClient, Frame, FrameCodec};
+use tessivum_node_bridge::{ClientConfig, FrameKind, HostCommand, NodeSupervisor};
 
 fn host_command() -> HostCommand {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -25,7 +31,8 @@ fn host_command() -> HostCommand {
     let command = HostCommand::new("bun")
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
-        .current_dir(root.join("node/compat-host"));
+        .current_dir(root.join("node/compat-host"))
+        .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0");
     if let Some(vendor_root) = std::env::var_os("CORDIS_VENDOR_ROOT") {
         command.env("CORDIS_VENDOR_ROOT", vendor_root)
     } else {
@@ -33,12 +40,15 @@ fn host_command() -> HostCommand {
     }
 }
 
+#[cfg(unix)]
 extern "C" {
     fn kill(process: i32, signal: i32) -> i32;
 }
 
+#[cfg(unix)]
 struct GrandchildGuard(u32);
 
+#[cfg(unix)]
 impl Drop for GrandchildGuard {
     fn drop(&mut self) {
         unsafe {
@@ -47,6 +57,7 @@ impl Drop for GrandchildGuard {
     }
 }
 
+#[cfg(unix)]
 fn process_is_alive(process: u32) -> bool {
     unsafe { kill(process as i32, 0) == 0 }
 }
@@ -93,6 +104,7 @@ fn supervisor_owns_a_real_host_generation_and_runs_cleanup_before_graceful_exit(
     assert!(supervisor.client().is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn client_sends_hello_before_requests_and_rejects_wrong_version_or_generation() {
     for (protocol_version, connection_generation) in [("cordis.node/v2", 9), ("cordis.node/v1", 10)]
@@ -126,6 +138,7 @@ fn client_sends_hello_before_requests_and_rejects_wrong_version_or_generation() 
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn client_accepts_a_log_before_ready() {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
@@ -177,6 +190,7 @@ fn client_accepts_a_log_before_ready() {
     host.join().expect("test host thread settles");
 }
 
+#[cfg(unix)]
 #[test]
 fn client_correlates_a_response_after_a_valid_handshake() {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
@@ -245,6 +259,7 @@ fn client_correlates_a_response_after_a_valid_handshake() {
     host.join().expect("test host thread settles");
 }
 
+#[cfg(unix)]
 #[test]
 fn cancellation_is_first_wins_and_a_late_response_cannot_reopen_the_correlation() {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
@@ -390,6 +405,7 @@ process.stdin.on("data", (chunk) => {
         .expect("environment test host exits after its exit response");
 }
 
+#[cfg(unix)]
 #[test]
 fn inbound_hello_before_ready_disconnects_without_invoking_handler() {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
@@ -424,6 +440,7 @@ fn inbound_hello_before_ready_disconnects_without_invoking_handler() {
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(unix)]
 #[test]
 fn correlated_response_wins_when_peer_closes_immediately_after_writing_it() {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
@@ -473,6 +490,7 @@ fn correlated_response_wins_when_peer_closes_immediately_after_writing_it() {
     host.join().expect("test host thread settles");
 }
 
+#[cfg(unix)]
 #[test]
 fn shutdown_terminates_bun_grandchildren_with_the_host_process_group() {
     let pid_file = std::env::temp_dir().join(format!(
@@ -544,6 +562,7 @@ process.stdin.on("data", (chunk) => {
     let _ = fs::remove_file(pid_file);
 }
 
+#[cfg(unix)]
 fn assert_inbound_request_cancel(kind: FrameKind) {
     let (socket, mut peer) = UnixStream::pair().expect("in-process stream pair opens");
     let reader = socket.try_clone().expect("client read side clones");
@@ -628,11 +647,13 @@ fn assert_inbound_request_cancel(kind: FrameKind) {
     client.close();
 }
 
+#[cfg(unix)]
 #[test]
 fn inbound_pnpm_run_does_not_block_its_generic_cancel() {
     assert_inbound_request_cancel(FrameKind::PnpmRun);
 }
 
+#[cfg(unix)]
 #[test]
 fn inbound_service_call_does_not_block_its_generic_cancel() {
     assert_inbound_request_cancel(FrameKind::ServiceCall);

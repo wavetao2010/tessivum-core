@@ -1,0 +1,76 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CORDIS_VENDOR_ROOT: ${{ github.workspace }}/.ci/deepseek-harness/vendor
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: 47f943859bef60e4160492346772ded9b24f765a
+          path: .ci/deepseek-harness
+
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-msvc, wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.0
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.7.0
+
+      - name: Install pinned DeepSeek dependencies
+        working-directory: .ci/deepseek-harness
+        run: pnpm install --frozen-lockfile
+
+      - name: Build pinned DeepSeek host modules
+        working-directory: .ci/deepseek-harness
+        run: pnpm run build:lib:host
+
+      - name: Install compatibility host dependencies
+        working-directory: node/compat-host
+        run: bun install --frozen-lockfile
+
+      - name: Type-check compatibility host
+        working-directory: node/compat-host
+        run: bun x tsc --noEmit
+
+      - name: Fetch Rust dependencies
+        run: cargo fetch --locked
+
+      - name: Check Windows workspace
+        run: cargo check --workspace --all-targets --locked
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --workspace --all-targets --locked
+
+      - name: Build Extism guest
+        run: cargo build -p tessivum-wasm-minimal --locked --release --target wasm32-unknown-unknown
+
+      - name: Exercise Native, Extism, and Legacy runtimes
+        env:
+          TESSIVUM_WASM_GUEST: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/tessivum_wasm_minimal.wasm
+        run: cargo run -p tessivum-runtime-smoke --locked
