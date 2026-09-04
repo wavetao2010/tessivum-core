@@ -43,6 +43,10 @@ jobs:
         working-directory: .ci/deepseek-harness
         run: pnpm install --frozen-lockfile
 
+      - name: Build pinned DeepSeek host modules
+        working-directory: .ci/deepseek-harness
+        run: pnpm run build:lib:host
+
       - name: Install compatibility host dependencies
         working-directory: node/compat-host
         run: bun install --frozen-lockfile
