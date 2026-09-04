@@ -1131,7 +1131,8 @@ fn node_supervisor(options: &Options, root: &Path, batch: usize) -> Result<NodeS
     let host = HostCommand::new(options.node_host.clone())
         .arg("run")
         .arg(root.join("node/compat-host/src/index.ts"))
-        .current_dir(root.join("node/compat-host"));
+        .current_dir(root.join("node/compat-host"))
+        .env("BUN_RUNTIME_TRANSPILER_CACHE_PATH", "0");
     let host = if let Some(vendor_root) = std::env::var_os("CORDIS_VENDOR_ROOT") {
         host.env("CORDIS_VENDOR_ROOT", vendor_root)
     } else {
