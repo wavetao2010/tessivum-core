@@ -851,9 +851,9 @@ fn spawn_dispatcher(inner: Arc<ClientInner>, receiver: Receiver<Inbound>) {
 
 /// A restartable command line for exactly one Node host profile.
 ///
-/// The child starts with an empty environment; [`HostCommand::env`] is its
-/// explicit allowlist. Unix hosts run in a dedicated process group. Windows
-/// hosts use a kill-on-close job object and fail startup if it cannot attach.
+/// The child receives only [`HostCommand::env`] plus OS variables required by
+/// the runtime. Unix hosts run in a dedicated process group. Windows hosts use
+/// a kill-on-close job object and fail startup if it cannot attach.
 #[derive(Clone)]
 pub struct HostCommand {
     pub program: PathBuf,
@@ -1124,9 +1124,12 @@ impl NodeSupervisor {
             command.current_dir(cwd);
         }
         configure_process_tree(&mut command);
+        command.args(&self.command.args).env_clear();
+        #[cfg(windows)]
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            command.env("SystemRoot", system_root);
+        }
         command
-            .args(&self.command.args)
-            .env_clear()
             .envs(self.command.env.iter().cloned())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
