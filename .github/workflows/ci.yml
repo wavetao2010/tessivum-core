@@ -65,7 +65,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Run Rust tests
-        run: cargo test --workspace --all-targets --locked -- --test-threads=1
+        run: cargo test --workspace --all-targets --locked
 
       - name: Build Extism guest
         run: cargo build -p tessivum-wasm-minimal --locked --release --target wasm32-unknown-unknown
