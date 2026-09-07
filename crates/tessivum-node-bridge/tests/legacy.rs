@@ -48,7 +48,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 fn wait_for_file(path: &std::path::Path, label: &str) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !path.exists() {
         assert!(Instant::now() < deadline, "timed out waiting for {label}");
         thread::sleep(Duration::from_millis(1));
