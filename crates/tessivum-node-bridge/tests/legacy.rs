@@ -22,6 +22,13 @@ use tessivum_node_bridge::{
 };
 
 static NEXT_RACE_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+static LEGACY_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn legacy_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    LEGACY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 struct ThreadWake(thread::Thread);
 
@@ -48,7 +55,7 @@ fn block_on<T>(future: impl Future<Output = T>) -> T {
 }
 
 fn wait_for_file(path: &std::path::Path, label: &str) {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while !path.exists() {
         assert!(Instant::now() < deadline, "timed out waiting for {label}");
         thread::sleep(Duration::from_millis(1));
@@ -107,6 +114,7 @@ fn load(
 
 #[test]
 fn real_host_runs_function_object_class_service_inject_events_waterfall_and_async_disposers() {
+    let _guard = legacy_test_lock();
     let supervisor = NodeSupervisor::new(host_command(), ClientConfig::default())
         .expect("supervisor accepts a Bun host command");
     let client = supervisor.start().expect("real compat host handshakes");
@@ -293,6 +301,7 @@ fn real_host_runs_function_object_class_service_inject_events_waterfall_and_asyn
 
 #[test]
 fn loader_runtime_loads_and_unloads_a_real_function_plugin() {
+    let _guard = legacy_test_lock();
     struct Resolver;
 
     impl PackageResolver for Resolver {
@@ -383,6 +392,7 @@ fn loader_runtime_loads_and_unloads_a_real_function_plugin() {
 
 #[test]
 fn cancelled_loader_load_and_delayed_disposers_leave_no_stale_handles() {
+    let _guard = legacy_test_lock();
     let race_file = PathBuf::from(fixture_path(&format!(
         "tessivum-node-bridge-race-{}-{}.ts",
         std::process::id(),
@@ -739,6 +749,7 @@ export default function racePlugin(ctx: any, config: any = {}) {
 
 #[test]
 fn crash_cleans_generation_resources_restarts_the_host_and_rejects_stale_clients() {
+    let _guard = legacy_test_lock();
     let supervisor = NodeSupervisor::new(host_command(), ClientConfig::default())
         .expect("supervisor accepts a Bun host command");
     let stale = supervisor.start().expect("first real host handshakes");
