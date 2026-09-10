@@ -6,6 +6,12 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## Unreleased
+
+- Assemble bounded native session snapshot pages before publishing Legacy route
+  context. Preserve prior cached history when a later page fails; agent metadata
+  inspection no longer needs to duplicate the session history.
+
 ## 0.1.6 — 2026-08-28
 
 ### Legacy Node compatibility host

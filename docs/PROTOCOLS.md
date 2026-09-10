@@ -240,6 +240,16 @@ Positional arrays are a Node-local compatibility form for arbitrary unversioned
 Node-provided Cordis services and explicitly known positional Node-local methods.
 DomainBridge product methods use strict object DTOs.
 
+The compatibility host hydrates route sessions through `sessions@1.snapshot`
+using `{ session, fromSeq, throughSeq? }`. The native result carries
+`session: { id, header, events }`, `throughSeq`, and optional `nextSeq` (the
+first excluded event). Continuations retain the first page's upper bound so
+concurrent appends cannot extend the read indefinitely. Each page fits the
+configured service frame limit; a single oversized event still fails explicitly.
+The host publishes the assembled history only after every page succeeds.
+`agents@1.inspectCompat` supplies agent metadata without another history copy.
+
+
 For `plugin.load`, an absolute, `file:`, or relative `package.location` is used
 as an import target; otherwise the package specifier is imported. The host
 selects `entry.options.export`, `entry.export`, or `export` when supplied, and

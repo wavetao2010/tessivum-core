@@ -597,15 +597,37 @@ export class CompatHost {
   }
 
   private async loadSession(sessionId: string) {
-    let sessionResult: RecordValue
+    let snapshot: RecordValue | undefined
+    const events: unknown[] = []
+    let fromSeq = 0
+    let throughSeq: number | undefined
     try {
-      sessionResult = object(await this.requestRemote('service.call', {
-        service: 'sessions@1',
-        method: 'snapshot',
-        params: { session: sessionId },
-      }), 'session snapshot result')
+      for (;;) {
+        const result = object(await this.requestRemote('service.call', {
+          service: 'sessions@1',
+          method: 'snapshot',
+          params: { session: sessionId, fromSeq, ...(throughSeq === undefined ? {} : { throughSeq }) },
+        }), 'session snapshot result')
+        const page = object(result.session, 'session snapshot')
+        if (page.id !== sessionId || !Array.isArray(page.events)) throw new BridgeError('INVALID_SESSION', 'invalid session snapshot page')
+        if (snapshot !== undefined && JSON.stringify(page.header) !== JSON.stringify(snapshot.header)) {
+          throw new BridgeError('SESSION_SNAPSHOT_CHANGED', 'session header changed while reading snapshot')
+        }
+        snapshot ??= page
+        for (const event of page.events) events.push(event)
+        if (result.nextSeq === undefined) break
+        const next = result.nextSeq
+        const end = result.throughSeq
+        if (typeof next !== 'number' || !Number.isSafeInteger(next) || next <= fromSeq
+          || typeof end !== 'number' || !Number.isSafeInteger(end) || end < next
+          || (throughSeq !== undefined && throughSeq !== end)) {
+          throw new BridgeError('INVALID_SESSION', 'invalid session snapshot continuation')
+        }
+        fromSeq = next
+        throughSeq = end
+      }
     } catch (error) {
-      if (error instanceof BridgeError && (error.details as RecordValue | undefined)?.code === 'SESSION_NOT_FOUND') return
+      if (snapshot === undefined && error instanceof BridgeError && (error.details as RecordValue | undefined)?.code === 'SESSION_NOT_FOUND') return
       throw error
     }
     const agentResult = object(await this.requestRemote('service.call', {
@@ -613,7 +635,7 @@ export class CompatHost {
       method: 'inspectCompat',
       params: { session: sessionId },
     }), 'agent snapshot result')
-    this.captureSession(object(sessionResult.session, 'session snapshot'))
+    this.captureSession({ ...snapshot, events })
     this.captureAgent(sessionId, agentResult)
   }
 
