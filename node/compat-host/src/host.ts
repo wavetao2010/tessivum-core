@@ -784,7 +784,10 @@ export class CompatHost {
       const request = object(payload, 'tool callback')
       const context = object(request.context, 'tool callback context')
       const sessionId = text(context.session, 'tool callback session')
-      const session = this.sessions.get(sessionId) ?? { id: sessionId, header: {}, events: [] }
+      await this.preloadSession(new URLSearchParams({ sessionId }).toString(), Buffer.alloc(0))
+      abortIfNeeded(signal)
+      const session = this.sessions.get(sessionId)
+      if (!session) throw new BridgeError('SESSION_NOT_FOUND', `unknown tool session ${sessionId}`)
       const value = await execute(request.arguments, {
         signal: signal ?? new AbortController().signal,
         agent: { session },

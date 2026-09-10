@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { CompatHost } from './host.ts'
 import { protocolVersion, type Frame } from './protocol.ts'
@@ -352,31 +355,31 @@ test('upgrade backend carries ws noServer connections', async () => {
   value.upgradeServer.stop(true)
 })
 
-test('tool facade registers an executable native callback', async () => {
+test('tool callbacks read files from a cold native session workspace', async () => {
   const value = host()
-  const calls: [string, any][] = []
-  value.requestRemote = (kind: string, payload: unknown) => {
-    calls.push([kind, payload])
-    return Promise.resolve({})
+  const workspace = mkdtempSync(join(tmpdir(), 'compat-tool-workspace-'))
+  writeFileSync(join(workspace, 'marker'), 'native workspace')
+  value.requestRemote = async (_kind: string, payload: any) => {
+    if (payload.service === 'sessions@1') return { session: { id: 's', header: { cwd: workspace }, events: [] } }
+    return {}
   }
   const dispose = value.registerTool({
-    name: 'sidebar_open',
-    description: 'Open the sidebar',
+    name: 'read_marker',
+    description: 'Read the workspace marker',
     parameters: { type: 'object', properties: {} },
     output: { render: (_args: unknown, result: unknown) => [{ type: 'text', text: String(result) }] },
-    execute: async () => 'opened',
+    execute: async (_args: unknown, context: any) => readFileSync(join(context.agent.session.header.cwd, 'marker'), 'utf8'),
   })
-  await value.flushRoutes()
-  const registration = calls[0]?.[1].params
-  const callback = value.callbacks.get(registration.callbackId)
-  assert.deepEqual(await callback({ context: { session: 's', call: 'c' }, arguments: {} }, new AbortController().signal), {
-    content: [{ type: 'text', text: 'opened' }],
-    isError: false,
-    meta: { value: 'opened' },
-  })
-  dispose()
-  await value.flushRoutes()
-  assert.equal(calls[1]?.[0], 'registration.dispose')
+  try {
+    await value.flushRoutes()
+    const callback = value.callbacks.values().next().value
+    const result = await callback({ context: { session: 's', call: 'c' }, arguments: {} }, new AbortController().signal)
+    assert.deepEqual(result.content, [{ type: 'text', text: 'native workspace' }])
+  } finally {
+    dispose()
+    await value.flushRoutes()
+    rmSync(workspace, { recursive: true, force: true })
+  }
 })
 
 test('nested callback responses bypass the serialized plugin request', async () => {

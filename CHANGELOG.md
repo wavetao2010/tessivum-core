@@ -6,6 +6,12 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## Unreleased
+
+### Legacy Node compatibility host
+
+- Hydrate the initiating native session before tool callbacks, check cancellation before plugin execution, and reject missing sessions instead of fabricating empty headers. Cold-session tools now resolve the authoritative workspace without requiring an earlier browser route request. Rust APIs and wire identifiers are unchanged.
+
 ## 0.1.6 — 2026-08-28
 
 ### Legacy Node compatibility host
