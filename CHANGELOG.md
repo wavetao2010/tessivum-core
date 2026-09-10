@@ -6,11 +6,14 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
-## Unreleased
+## 0.1.7 — 2026-09-10
 
 ### Legacy Node compatibility host
 
 - Hydrate the initiating native session before tool callbacks, check cancellation before plugin execution, and reject missing sessions instead of fabricating empty headers. Cold-session tools now resolve the authoritative workspace without requiring an earlier browser route request. Rust APIs and wire identifiers are unchanged.
+- Assemble bounded native session snapshot pages before publishing Legacy route
+  context. Preserve prior cached history when a later page fails; agent metadata
+  inspection no longer needs to duplicate the session history.
 
 ## 0.1.6 — 2026-08-28
 

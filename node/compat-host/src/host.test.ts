@@ -430,6 +430,32 @@ test('route invoke adapts a bounded request and completed response', async () =>
   assert.deepEqual(result.headers, [['x-result', 'yes']])
   assert.equal(Buffer.from(result.bodyBase64, 'base64').byteLength, 20_000)
 })
+
+test('routes see complete paged histories and never publish a partial reload', async () => {
+  const value = host()
+  const events = [{ seq: 0, data: 'first' }, { seq: 1, data: 'last' }]
+  let failSecondPage = false
+  value.requestRemote = async (_kind: string, request: any) => {
+    if (request.service === 'agents@1') return { live: false }
+    const from = request.params.fromSeq
+    if (from === 1 && failSecondPage) throw new Error('second page unavailable')
+    return {
+      session: { id: 'paged', header: { cwd: '/workspace' }, events: [events[from]] },
+      throughSeq: 1,
+      ...(from === 0 ? { nextSeq: 1 } : {}),
+    }
+  }
+  value.routes.set('paged-route', {
+    registered: true, removed: false,
+    handler: (_request: any, response: any) => response.end(JSON.stringify(value.sessions.get('paged').events)),
+  })
+  const request = { routeId: 'paged-route', method: 'GET', path: '/sidebar/history', query: 'sessionId=paged', headers: [], bodyBase64: '' }
+  const result = await value.invokeRoute(request, new AbortController().signal)
+  assert.deepEqual(JSON.parse(Buffer.from(result.bodyBase64, 'base64').toString()), events)
+  failSecondPage = true
+  await assert.rejects(value.invokeRoute(request, new AbortController().signal), /second page unavailable/)
+  assert.deepEqual(value.sessions.get('paged').events, events)
+})
 test('pnpm output streams beyond the consumer rolling-tail size and cancel is correlated', async () => {
   const value = host()
   const frames: [string, bigint | undefined][] = []
