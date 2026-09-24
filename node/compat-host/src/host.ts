@@ -271,6 +271,7 @@ function installVendorResolver(vendor: string) {
   const aliases: Record<string, string> = {
     '@deepseek-ai/cordis': join(vendor, 'cordis', 'lib', 'index.js'),
     '@deepseek-ai/cosmokit': join(vendor, 'cosmokit', 'lib', 'index.js'),
+    '@deepseek-ai/schemastery': join(vendor, 'schemastery', 'lib', 'index.mjs'),
     '@deepseek-ai/cordis-plugin-loader': join(vendor, 'loader', 'lib', 'index.js'),
     cordis: join(vendor, 'cordis', 'lib', 'index.js'),
     cosmokit: join(vendor, 'cosmokit', 'lib', 'index.js'),
@@ -837,6 +838,36 @@ export class CompatHost {
     }
   }
 
+  private registerSystemPrompt(value: unknown) {
+    const section = object(value, 'system prompt section')
+    const id = text(section.name, 'system prompt section name')
+    if (typeof section.order !== 'number' || !Number.isSafeInteger(section.order)) {
+      throw new BridgeError('INVALID_PAYLOAD', 'system prompt section order must be a safe integer')
+    }
+    if (typeof section.text !== 'string') throw new BridgeError('INVALID_PAYLOAD', 'system prompt section text must be a string')
+    if (section.complete !== undefined && section.complete !== false) {
+      throw new BridgeError('INVALID_PAYLOAD', 'complete system prompt sections are not supported by the native bridge')
+    }
+    const registrationId = `${this.generation}:prompt:${this.nextOperationId++}`
+    const remove = () => this.requestRemote('registration.dispose', { registrationId })
+    let registered = false
+    let disposed = false
+    const pending = this.requestRemote('service.provide', {
+      service: 'systemPrompt@1',
+      method: 'register',
+      params: { registrationId, id, order: section.order, text: section.text },
+    }).then(() => {
+      registered = true
+      if (disposed) return remove()
+    })
+    this.trackRoute(pending)
+    return () => {
+      if (disposed) return
+      disposed = true
+      if (registered) this.trackRoute(remove())
+    }
+  }
+
   private apiDomain(service: string, aliases: Record<string, string> = {}) {
     return new Proxy(Object.create(null), {
       get: (_target, property) => {
@@ -1132,7 +1163,10 @@ export class CompatHost {
   private async initialize() {
     if (this.root) return
     // The vendor root is selected at runtime, so these module URLs cannot be static imports.
-    const cordis = await import(pathToFileURL(join(this.vendor, 'cordis', 'lib', 'index.js')).href) as { Context: new () => Context }
+    const cordis = await import(pathToFileURL(join(this.vendor, 'cordis', 'lib', 'index.js')).href) as {
+      Context: new () => Context
+      Service: new (ctx: Context, name: string) => { ctx: Context }
+    }
     const loaderModule = await import(pathToFileURL(join(this.vendor, 'loader', 'lib', 'index.js')).href) as { Loader: new (ctx: Context, config?: RecordValue) => Loader }
     this.root = new cordis.Context()
     this.root.baseUrl = pathToFileURL(`${process.cwd()}/`).href
@@ -1145,6 +1179,14 @@ export class CompatHost {
       }),
     })
     this.loader = new loaderModule.Loader(this.root, { baseUrl: this.root.baseUrl })
+    const host = this
+    class NativeSystemPrompt extends cordis.Service {
+      constructor(ctx: Context) { super(ctx, 'systemPrompt') }
+      section(value: unknown) {
+        return this.ctx.effect(() => host.registerSystemPrompt(value), 'systemPrompt.section()')
+      }
+    }
+    await this.root.plugin(NativeSystemPrompt)
     this.installCompatibilityServices()
   }
 
