@@ -12,6 +12,7 @@ independently of crate/repository releases.
 
 - Expose the native `systemPrompt@1` service to Legacy Node plugins through `ctx.systemPrompt.section({ name, order, text })`; registrations are scoped to the plugin and disposed with it.
 - Resolve the vendored `@deepseek-ai/schemastery` module through the compatibility host's package resolver.
+- Serve Legacy WebSocket upgrade routes through a real Node HTTP upgrade socket so unchanged `ws` `WebSocketServer({ noServer: true })` handlers receive the expected `Duplex` contract.
 - Preserve `cordis.node/v1`, `cordis.plugin/v1`, and the documented Rust APIs.
 
 ## 0.1.7 — 2026-09-10

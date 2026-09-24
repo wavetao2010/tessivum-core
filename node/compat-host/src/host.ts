@@ -1,6 +1,7 @@
 import { Buffer } from 'node:buffer'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { type IncomingMessage } from 'node:http'
+import { createServer } from 'node:http'
+import type { IncomingMessage, Server as HttpServer } from 'node:http'
 import { existsSync, statSync } from 'node:fs'
 import { basename, isAbsolute, join, resolve } from 'node:path'
 import { PassThrough, Readable, type Duplex } from 'node:stream'
@@ -67,14 +68,6 @@ type PnpmOperation = {
 }
 type Profile = { name: string; dir: string }
 type RemoteRequest = { requestId: bigint; promise: Promise<unknown> }
-type UpgradeSocketData = {
-  open(socket: Bun.ServerWebSocket<UpgradeSocketData>): void
-  close(socket: Bun.ServerWebSocket<UpgradeSocketData>, code: number, reason: string): void
-  message(socket: Bun.ServerWebSocket<UpgradeSocketData>, message: string | Buffer): void
-  drain(socket: Bun.ServerWebSocket<UpgradeSocketData>): void
-  ping(socket: Bun.ServerWebSocket<UpgradeSocketData>, data: Buffer): void
-  pong(socket: Bun.ServerWebSocket<UpgradeSocketData>, data: Buffer): void
-}
 type SessionSnapshot = { id: string; header: RecordValue; events: unknown[] }
 type AgentSnapshot = { live: boolean; status?: string; options: RecordValue }
 
@@ -107,7 +100,6 @@ const positionalServiceMethods: Record<string, true> = {
   'desktopPnpm@1.runPlugin': true,
 }
 const rawStdoutWrite = process.stdout.write.bind(process.stdout) as (chunk: Uint8Array) => boolean
-const bunInternals = Symbol.for('::bunternal::')
 const rawStderrWrite = process.stderr.write.bind(process.stderr) as (chunk: string) => boolean
 
 class BridgeError extends Error {
@@ -138,9 +130,13 @@ function optionalText(value: unknown) {
 function abortIfNeeded(signal: AbortSignal) {
   if (signal.aborted) throw new BridgeError('CANCELLED', 'request cancelled')
 }
-
 function settled(result: unknown) {
   return Promise.resolve(result)
+}
+
+function rejectUpgrade(socket: Duplex, status: number) {
+  const reason = status === 403 ? 'Forbidden' : status === 404 ? 'Not Found' : status === 410 ? 'Gone' : 'Bad Request'
+  socket.end(`HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`)
 }
 
 /** Converts host values to bounded JSON so diagnostics never break the transport. */
@@ -358,7 +354,7 @@ export class CompatHost {
   private nextOperationId = 1n
   private readonly upgrades = new Map<string, UpgradeRoute>()
   private readonly upgradeToken = randomBytes(32).toString('hex')
-  private upgradeServer: Bun.Server<UpgradeSocketData> | undefined
+  private upgradeServer: HttpServer | undefined
   private upgradePort: Promise<number> | undefined
   private settingsFiber: Fiber | undefined
   private nextToolId = 1n
@@ -482,65 +478,67 @@ export class CompatHost {
 
   private startUpgradeServer() {
     if (this.upgradePort) return this.upgradePort
-    const server = Bun.serve<UpgradeSocketData>({
-      hostname: '127.0.0.1',
-      port: 0,
-      fetch: async (request, server) => {
-        if (request.headers.get('x-tessivum-upgrade-token') !== this.upgradeToken) {
-          return new Response(null, { status: 403 })
-        }
-        const url = new URL(request.url)
-        const route = [...this.upgrades.values()].find(candidate => !candidate.removed && candidate.path === url.pathname)
-        if (!route) return new Response(null, { status: 404 })
-        await this.preloadSession(url.searchParams.toString(), Buffer.alloc(0))
-        if (route.removed) return new Response(null, { status: 410 })
-
-        let upgraded = false
-        let destroyed = false
-        const upgradeFacade = {
-          upgrade: (inner: Request, options: any) => {
-            upgraded = server.upgrade(inner, options)
-            return upgraded
-          },
-        }
-        const socket = {
-          readable: true,
-          writable: true,
-          destroyed: false,
-          server: { [bunInternals]: upgradeFacade },
-          [bunInternals]: request,
-          destroy() {
-            destroyed = true
-            return this
-          },
-        } as unknown as Duplex
-        const nodeRequest = {
-          method: request.method,
-          url: `${url.pathname}${url.search}`,
-          headers: Object.fromEntries(request.headers),
-          socket,
-        } as unknown as IncomingMessage
-        route.handler(nodeRequest, socket, Buffer.alloc(0))
-        return upgraded ? undefined : new Response(null, { status: destroyed ? 403 : 400 })
-      },
-      websocket: {
-        open: socket => socket.data.open(socket),
-        close: (socket, code, reason) => socket.data.close(socket, code, reason),
-        message: (socket, message) => socket.data.message(socket, message),
-        drain: socket => socket.data.drain(socket),
-        ping: (socket, data) => socket.data.ping(socket, data),
-        pong: (socket, data) => socket.data.pong(socket, data),
-      },
+    const server = createServer((_request, response) => {
+      response.writeHead(404)
+      response.end()
     })
-    const port = server.port
-    if (port === undefined) {
-      server.stop(true)
-      throw new BridgeError('UPGRADE_LISTEN_FAILED', 'upgrade backend did not bind a TCP port')
-    }
-    const ready = Promise.resolve(port)
+    server.on('upgrade', (request, socket, head) => {
+      void (async () => {
+        const token = request.headers['x-tessivum-upgrade-token']
+        if (token !== this.upgradeToken) {
+          rejectUpgrade(socket, 403)
+          return
+        }
+        let url: URL
+        try {
+          url = new URL(request.url ?? '/', 'http://127.0.0.1')
+        } catch {
+          rejectUpgrade(socket, 400)
+          return
+        }
+        const route = [...this.upgrades.values()].find(candidate => !candidate.removed && candidate.path === url.pathname)
+        if (!route) {
+          rejectUpgrade(socket, 404)
+          return
+        }
+        await this.preloadSession(url.searchParams.toString(), Buffer.alloc(0))
+        if (route.removed) {
+          rejectUpgrade(socket, 410)
+          return
+        }
+        await settled(route.handler(request, socket, head))
+      })().catch(error => socket.destroy(error instanceof Error ? error : undefined))
+    })
+    const ready = new Promise<number>((resolve, reject) => {
+      const onError = (error: Error) => {
+        this.upgradeServer = undefined
+        this.upgradePort = undefined
+        reject(new BridgeError('UPGRADE_LISTEN_FAILED', error.message))
+      }
+      server.once('error', onError)
+      server.listen(0, '127.0.0.1', () => {
+        const address = server.address()
+        const port = address && typeof address === 'object' ? address.port : undefined
+        if (port === undefined) {
+          server.close()
+          onError(new Error('upgrade backend did not bind a TCP port'))
+          return
+        }
+        server.off('error', onError)
+        resolve(port)
+      })
+    })
     this.upgradeServer = server
     this.upgradePort = ready
     return ready
+  }
+
+  private async stopUpgradeServer() {
+    const server = this.upgradeServer
+    if (!server || !server.listening) return
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    this.upgradeServer = undefined
+    this.upgradePort = undefined
   }
 
   private registerUpgrade(value: unknown) {
@@ -1722,7 +1720,7 @@ export class CompatHost {
       this.plugins.clear()
       this.registrations.clear()
       if (this.root) await Promise.allSettled([this.root.fiber.dispose()])
-      if (this.upgradeServer) await this.upgradeServer.stop(true)
+      if (this.upgradeServer) await this.stopUpgradeServer()
       this.phase = 'closed'
     })()
     return this.shutdownTask

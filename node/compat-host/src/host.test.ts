@@ -352,7 +352,7 @@ test('upgrade backend carries ws noServer connections', async () => {
   })
   assert.equal(message, 'ready')
   client.close()
-  value.upgradeServer.stop(true)
+  await value.stopUpgradeServer()
 })
 
 test('tool callbacks read files from a cold native session workspace', async () => {
