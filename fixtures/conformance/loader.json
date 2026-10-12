@@ -17,5 +17,16 @@
       {"id": "atomic-write", "write": "atomic"}
     ]
   },
-  "expectedTrace": []
+  "expectedTrace": [
+    {"event": "config-committed", "subject": "unordered-dependencies", "phase": "catalog", "value": {"consumerActive": true}},
+    {"event": "config-committed", "subject": "duplicate-id", "phase": "catalog", "value": {"duplicateRejected": true}},
+    {"event": "config-committed", "subject": "add-update-remove-move", "phase": "catalog", "value": {"ids": ["third", "second"]}},
+    {"event": "config-committed", "subject": "config-only-update", "phase": "catalog", "value": {"revision": 2}},
+    {"event": "config-committed", "subject": "plugin-replacement", "phase": "catalog", "value": {"active": "replacement"}},
+    {"event": "config-committed", "subject": "candidate-failure", "phase": "catalog", "value": {"tree": "old"}},
+    {"event": "config-committed", "subject": "rollback-failure", "phase": "catalog", "value": {"tree": "old", "rollbackFailed": true}},
+    {"event": "config-committed", "subject": "nested-group", "phase": "catalog", "value": {"activeEntries": 1}},
+    {"event": "config-committed", "subject": "patch-insertion-later-targeting", "phase": "catalog", "value": {"patched": true}},
+    {"event": "config-committed", "subject": "atomic-write", "phase": "catalog", "value": {"persisted": true}}
+  ]
 }

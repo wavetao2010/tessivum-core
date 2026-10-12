@@ -2,9 +2,8 @@
   "schemaVersion": "tessivum.conformance/v1",
   "name": "lifecycle.core-catalog",
   "domain": "lifecycle",
-  "scenario": "effect-dispose",
+  "scenario": "lifecycle-catalog",
   "input": {
-    "effects": ["effect-dispose"],
     "cases": [
       {"id": "sync-start", "start": "sync"},
       {"id": "async-start", "start": "async"},
@@ -21,12 +20,17 @@
     ]
   },
   "expectedTrace": [
-    {"event": "fiber-created", "subject": "effect-dispose"},
-    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "PENDING", "to": "LOADING"},
-    {"event": "effect-created", "subject": "effect-dispose.effect", "label": "effect-dispose"},
-    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "LOADING", "to": "ACTIVE"},
-    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "ACTIVE", "to": "UNLOADING"},
-    {"event": "effect-disposed", "subject": "effect-dispose.effect", "label": "effect-dispose"},
-    {"event": "fiber-state-changed", "subject": "effect-dispose", "from": "UNLOADING", "to": "DISPOSED"}
+    {"event": "effect-disposed", "subject": "sync-start", "phase": "catalog", "value": {"state": "ACTIVE", "disposed": true}},
+    {"event": "effect-disposed", "subject": "async-start", "phase": "catalog", "value": {"state": "ACTIVE", "disposed": true}},
+    {"event": "effect-disposed", "subject": "sync-cleanup", "phase": "catalog", "value": {"calls": 1}},
+    {"event": "effect-disposed", "subject": "async-cleanup", "phase": "catalog", "value": {"calls": 1}},
+    {"event": "effect-disposed", "subject": "iterable-cleanup", "phase": "catalog", "value": {"order": ["second", "first"]}},
+    {"event": "effect-disposed", "subject": "nested-effect", "phase": "catalog", "value": {"childDisposed": true, "calls": 1}},
+    {"event": "effect-disposed", "subject": "reverse-disposal", "phase": "catalog", "value": {"order": ["second", "first"]}},
+    {"event": "effect-disposed", "subject": "repeated-disposal", "phase": "catalog", "value": {"calls": 1}},
+    {"event": "effect-disposed", "subject": "reentrant-disposal", "phase": "catalog", "value": {"calls": 1, "state": "DISPOSED"}},
+    {"event": "effect-disposed", "subject": "failed-start-rollback", "phase": "catalog", "value": {"state": "FAILED", "cleanupCalls": 1}},
+    {"event": "effect-disposed", "subject": "parent-child-quiescence", "phase": "catalog", "value": {"childDisposed": true, "order": ["child", "parent"]}},
+    {"event": "effect-disposed", "subject": "unload-registration-rejection", "phase": "catalog", "value": {"rejected": true}}
   ]
 }

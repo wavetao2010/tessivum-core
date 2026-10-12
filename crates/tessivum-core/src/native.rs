@@ -659,7 +659,12 @@ impl NativePluginInstance {
                 Err(cleanup) => Err(NativePluginError::cleanup(vec![error, cleanup])),
             };
         }
-        candidate.context.commit_staged();
+        if let Err(error) = candidate.context.commit_staged() {
+            return match candidate.dispose().await {
+                Ok(()) => Err(error.into()),
+                Err(cleanup) => Err(NativePluginError::cleanup(vec![error.into(), cleanup])),
+            };
+        }
         let result = self.stop_current().await;
         *self = candidate;
         result

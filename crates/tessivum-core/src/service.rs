@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::{
     ids::{next_generation, next_resource_id},
-    CoreError, Generation, RealmLabel, ResourceId, ScopeId, ServiceKey,
+    CoreError, Generation, RealmLabel, ResourceId, ServiceKey,
 };
 
 /// A dependency which may gate a managed service consumer.
@@ -168,6 +168,7 @@ struct Listener {
 struct RegistryState {
     providers: BTreeMap<ResolvedService, ServiceEntry>,
     listeners: BTreeMap<ResourceId, Listener>,
+    expected_parent: BTreeMap<ResolvedService, Option<Generation>>,
     committed: bool,
 }
 
@@ -192,57 +193,86 @@ impl Registry {
         })
     }
 
-    pub(crate) fn commit(&self) {
+    pub(crate) fn commit(&self) -> Result<(), CoreError> {
         let Some(parent) = &self.parent else {
-            return;
+            return Ok(());
         };
-        let services = {
+        let (services, retired) = {
             let mut state = lock(&self.state);
             if state.committed {
-                return;
+                return Ok(());
             }
-            let providers = std::mem::take(&mut state.providers);
-            let mut services = Vec::with_capacity(providers.len());
-            for (service, entry) in providers {
-                parent.insert(service.clone(), entry);
+            let mut host = lock(&parent.state);
+            for (service, expected) in &state.expected_parent {
+                if host.providers.get(service).map(|entry| entry.generation) != *expected {
+                    return Err(CoreError::ServiceChanged {
+                        key: service.key.diagnostic_key(),
+                    });
+                }
+            }
+            let mut services = Vec::with_capacity(state.providers.len());
+            let mut retired = Vec::new();
+            for (service, entry) in std::mem::take(&mut state.providers) {
+                if let Some(old) = host.providers.insert(service.clone(), entry) {
+                    retired.push(old);
+                }
                 services.push(service);
             }
+            state.expected_parent.clear();
             state.committed = true;
-            services
+            (services, retired)
         };
+        drop(retired);
         for service in services {
             parent.notify(&service);
         }
+        Ok(())
     }
 
+    /// Mutates the selected registry without notifying user callbacks.
+    /// Retired values are returned so their destructors run outside admission locks.
     pub(crate) fn provide(
         &self,
         service: ResolvedService,
-        _owner: ScopeId,
         value: Arc<dyn Any + Send + Sync>,
-    ) -> Generation {
-        let generation = next_generation();
-        let entry = ServiceEntry { generation, value };
-        let parent = {
-            let mut state = lock(&self.state);
-            if state.committed {
-                self.parent.clone()
-            } else {
-                state.providers.insert(service.clone(), entry.clone());
-                None
-            }
-        };
-        if let Some(parent) = parent {
-            parent.insert(service.clone(), entry);
-            parent.notify(&service);
-        } else {
-            self.notify(&service);
+        replace: bool,
+    ) -> Result<(Generation, Option<ServiceEntry>), CoreError> {
+        let mut state = lock(&self.state);
+        if state.committed {
+            drop(state);
+            return self
+                .parent
+                .as_ref()
+                .expect("committed staging has a host")
+                .provide(service, value, replace);
         }
-        generation
-    }
-
-    fn insert(&self, service: ResolvedService, entry: ServiceEntry) {
-        lock(&self.state).providers.insert(service, entry);
+        let parent_generation = self
+            .parent
+            .as_ref()
+            .and_then(|parent| parent.entry(&service))
+            .map(|entry| entry.generation);
+        let present = state.providers.contains_key(&service) || parent_generation.is_some();
+        if !replace && present {
+            return Err(CoreError::ServiceAlreadyProvided {
+                key: service.key.diagnostic_key(),
+            });
+        }
+        if replace && !present {
+            return Err(CoreError::ServiceNotProvided {
+                key: service.key.diagnostic_key(),
+            });
+        }
+        let generation = next_generation();
+        if self.parent.is_some() {
+            state
+                .expected_parent
+                .entry(service.clone())
+                .or_insert(parent_generation);
+        }
+        let retired = state
+            .providers
+            .insert(service, ServiceEntry { generation, value });
+        Ok((generation, retired))
     }
 
     pub(crate) fn remove_if_current(
@@ -261,6 +291,7 @@ impl Registry {
                     .is_some_and(|entry| entry.generation == generation);
                 if is_current {
                     state.providers.remove(service);
+                    state.expected_parent.remove(service);
                 }
                 (is_current, None)
             }
@@ -364,9 +395,17 @@ impl Registry {
         dependency_snapshot_from(&lock(&self.state), dependencies)
     }
 
-    fn notify(&self, changed: &ResolvedService) {
+    pub(crate) fn notify(&self, changed: &ResolvedService) {
         let deliveries = {
             let state = lock(&self.state);
+            if state.committed {
+                drop(state);
+                return self
+                    .parent
+                    .as_ref()
+                    .expect("committed staging has a host")
+                    .notify(changed);
+            }
             state
                 .listeners
                 .values()

@@ -28,6 +28,7 @@ use crate::protocol::{BridgeError, BridgeResult, Frame, FrameCodec, FrameKind, R
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BRIDGE_REQUEST_ID: u64 = 9_007_199_254_740_991;
+const MAX_PENDING_REQUESTS: usize = 4096;
 
 const MAX_STARTUP_STDERR_BYTES: usize = 4 * 1024;
 
@@ -666,7 +667,15 @@ impl BridgeClient {
             })
             .map_err(|_| BridgeError::InvalidFrame("bridge request ids exhausted".into()))?;
         let (reply, receiver) = mpsc::channel();
-        lock(&self.inner.pending).insert(request_id, reply);
+        {
+            let mut pending = lock(&self.inner.pending);
+            if pending.len()
+                >= MAX_PENDING_REQUESTS.min(self.inner.config.queue_capacity.max(1) * 64)
+            {
+                return Err(BridgeError::QueueFull);
+            }
+            pending.insert(request_id, reply);
+        }
         let frame = Frame::request(self.generation(), request_id, kind, payload);
         if let Err(error) = self.inner.send(frame) {
             self.inner.resolve_pending(request_id, Err(error.clone()));

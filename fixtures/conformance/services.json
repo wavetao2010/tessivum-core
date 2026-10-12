@@ -2,11 +2,8 @@
   "schemaVersion": "tessivum.conformance/v1",
   "name": "service.core-catalog",
   "domain": "service",
-  "scenario": "isolate-realm",
+  "scenario": "service-catalog",
   "input": {
-    "service": "storage",
-    "first": "root",
-    "second": "isolated",
     "cases": [
       {"id": "late-provider", "required": "clock"},
       {"id": "provider-replacement", "service": "theme"},
@@ -20,19 +17,14 @@
     ]
   },
   "expectedTrace": [
-    {"event": "fiber-created", "subject": "isolate-realm.root"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "PENDING", "to": "LOADING"},
-    {"event": "service-provided", "subject": "storage", "label": "root"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "LOADING", "to": "ACTIVE"},
-    {"event": "fiber-created", "subject": "isolate-realm.isolated"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "PENDING", "to": "LOADING"},
-    {"event": "service-provided", "subject": "storage", "label": "isolated"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "LOADING", "to": "ACTIVE"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "ACTIVE", "to": "UNLOADING"},
-    {"event": "service-removed", "subject": "storage", "label": "isolated"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.isolated", "from": "UNLOADING", "to": "DISPOSED"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "ACTIVE", "to": "UNLOADING"},
-    {"event": "service-removed", "subject": "storage", "label": "root"},
-    {"event": "fiber-state-changed", "subject": "isolate-realm.root", "from": "UNLOADING", "to": "DISPOSED"}
+    {"event": "service-provided", "subject": "late-provider", "phase": "catalog", "value": {"readyBefore": false, "readyAfter": true, "visible": "wall"}},
+    {"event": "service-provided", "subject": "provider-replacement", "phase": "catalog", "value": {"oldStale": true, "visible": "dark"}},
+    {"event": "service-provided", "subject": "provider-removal-recovery", "phase": "catalog", "value": {"missingAfterRemoval": true, "oldStale": true, "visible": "new"}},
+    {"event": "service-provided", "subject": "optional-dependency", "phase": "catalog", "value": {"ready": true, "visible": null}},
+    {"event": "service-provided", "subject": "duplicate-provider", "phase": "catalog", "value": {"duplicateRejected": true, "visible": "first"}},
+    {"event": "service-provided", "subject": "isolate-realms", "phase": "catalog", "value": {"alpha": "alpha", "betaMissing": true}},
+    {"event": "service-provided", "subject": "shared-realm", "phase": "catalog", "value": {"visible": "shared"}},
+    {"event": "service-provided", "subject": "intercept-merge", "phase": "catalog", "value": {"config": {"retry": {"backoff": "fast"}, "source": "child"}}},
+    {"event": "service-provided", "subject": "stale-generation", "phase": "catalog", "value": {"oldStale": true, "visible": "dark"}}
   ]
 }

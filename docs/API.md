@@ -66,7 +66,12 @@ drop(provider);
 ```
 
 `provide<T>` stores a `Send + Sync + 'static` native value and returns a
-`ServiceHandle<T>`. The provider is removed automatically when the owning
+`ServiceHandle<T>`. Registration is strict: it returns
+`CoreError::ServiceAlreadyProvided` when the key is already visible in the
+selected realm. Use `replace<T>` only when replacing an existing provider;
+it returns `CoreError::ServiceNotProvided` when no provider is visible.
+Replacement is generation-checked and invalidates old handles only after the
+new provider commits. The provider is removed automatically when its owning
 context scope disposes. `get<T>` returns `Ok(None)` when absent and
 `CoreError::ServiceTypeMismatch` for a key registered with a different native
 type. A handle is generation-checked: call `is_current()` or

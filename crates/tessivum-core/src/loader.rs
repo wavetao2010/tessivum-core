@@ -758,6 +758,8 @@ async fn activate_all(entries: &mut [LiveEntry]) -> Vec<LoaderResult<()>> {
                 Err(error) => errors.push(error),
             }
         }
+        // Pending is a managed dependency wait, not an activation failure.
+        // A later provider notification can activate the retained handle.
         if !errors.is_empty() || !progressed {
             break;
         }

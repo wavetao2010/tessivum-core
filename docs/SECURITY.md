@@ -86,10 +86,8 @@ capability set and handlers appropriate to the data and side effects exposed.
 - Both Rust and Bun endpoints require `cordis.node/v1` exactly. The host accepts
   `hello` first, binds one nonzero connection generation, and rejects a later
   frame from any other generation. The Rust client rejects work before ready.
-- Client queues are bounded (default capacity 64). Queue pressure returns an
-  error rather than allocating an unbounded backlog. Pending requests are
-  settled on disconnect; timeout, explicit cancellation, and dropped request
-  handles remove local pending state and send a cancel frame when possible.
+- Client queues and pending request correlations are bounded; queue pressure returns an error rather than retaining an unbounded backlog. Pending requests are settled on disconnect; timeout, explicit cancellation, and dropped request handles remove local pending state and send a cancel frame when possible.
+- Compat-host operation cancellation covers both active and queued serial work. Session hydration is bounded by page, event-count, and byte budgets; cached agent state is capped with oldest-entry eviction.
 - `NodeSupervisor` owns one child process per profile. On bridge disconnect,
   crash, protocol failure, shutdown, or drop, it closes the client, terminates
   the child if necessary, and runs all local cleanups registered for that

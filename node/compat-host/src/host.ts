@@ -71,6 +71,10 @@ type RemoteRequest = { requestId: bigint; promise: Promise<unknown> }
 type SessionSnapshot = { id: string; header: RecordValue; events: unknown[] }
 type AgentSnapshot = { live: boolean; status?: string; options: RecordValue }
 
+const maxSessionSnapshotPages = 256
+const maxSessionSnapshotEvents = 100_000
+const maxSessionSnapshotBytes = 16 * 1024 * 1024
+const maxCompatAgents = 128
 const maxRouteRequestBytes = 2 * 1024 * 1024
 const maxRouteResponseBytes = 8 * 1024 * 1024
 const maxRouteHeaders = 128
@@ -341,6 +345,7 @@ export class CompatHost {
   private readonly registrations = new Map<string, Registration>()
   private readonly callbacks = new Map<string, (...args: any[]) => unknown>()
   private readonly incoming = new Map<string, Incoming>()
+  private readonly queuedIncoming = new Map<string, Incoming>()
   private readonly outgoing = new Map<string, Outgoing>()
   private nextRequestId = 2n
   private readonly cancelledOutgoing = new Set<string>()
@@ -598,22 +603,29 @@ export class CompatHost {
   private async loadSession(sessionId: string) {
     let snapshot: RecordValue | undefined
     const events: unknown[] = []
+    let eventBytes = 0
+    let pages = 0
     let fromSeq = 0
     let throughSeq: number | undefined
     try {
       for (;;) {
+        if (++pages > maxSessionSnapshotPages) throw new BridgeError('INVALID_SESSION', 'session snapshot has too many pages')
         const result = object(await this.requestRemote('service.call', {
           service: 'sessions@1',
           method: 'snapshot',
           params: { session: sessionId, fromSeq, ...(throughSeq === undefined ? {} : { throughSeq }) },
         }), 'session snapshot result')
-        const page = object(result.session, 'session snapshot')
+        const page = object(result.session, 'session snapshot page')
         if (page.id !== sessionId || !Array.isArray(page.events)) throw new BridgeError('INVALID_SESSION', 'invalid session snapshot page')
         if (snapshot !== undefined && JSON.stringify(page.header) !== JSON.stringify(snapshot.header)) {
           throw new BridgeError('SESSION_SNAPSHOT_CHANGED', 'session header changed while reading snapshot')
         }
         snapshot ??= page
-        for (const event of page.events) events.push(event)
+        for (const event of page.events) {
+          eventBytes += Buffer.byteLength(JSON.stringify(event) ?? 'null')
+          if (events.length >= maxSessionSnapshotEvents || eventBytes > maxSessionSnapshotBytes) throw new BridgeError('INVALID_SESSION', 'session snapshot exceeds hydration limits')
+          events.push(event)
+        }
         if (result.nextSeq === undefined) break
         const next = result.nextSeq
         const end = result.throughSeq
@@ -657,6 +669,12 @@ export class CompatHost {
       ...(typeof value.status === 'string' ? { status: value.status } : {}),
       options,
     })
+    while (this.agents.size > maxCompatAgents) {
+      const oldest = this.agents.keys().next().value
+      if (oldest === undefined) break
+      this.agents.delete(oldest)
+      this.agentQueues.delete(oldest)
+    }
     if (value.session && typeof value.session === 'object' && !Array.isArray(value.session)) this.captureSession(value.session as RecordValue)
   }
 
@@ -1231,14 +1249,14 @@ export class CompatHost {
       return
     }
     if (frame.kind === 'response' || frame.kind === 'error') {
-      if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) {
-        return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'response belongs to another connection generation'))
-      }
-      try {
-        return this.resolveOutgoing(frame)
-      } catch (error) {
-        return this.fatal(error)
-      }
+      if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'response belongs to another connection generation'))
+      try { return this.resolveOutgoing(frame) } catch (error) { return this.fatal(error) }
+    }
+    if (operationKinds.has(frame.kind) && frame.requestId !== undefined && frame.requestId !== 0n) {
+      const key = frame.requestId.toString()
+      if (this.incoming.has(key) || this.queuedIncoming.has(key)) return this.fault(frame, new BridgeError('DUPLICATE_REQUEST_ID', `request ${key} is already active`))
+      if (this.incoming.size + this.queuedIncoming.size >= 64) return this.respondError(frame, new BridgeError('QUEUE_FULL', 'too many queued operations'))
+      this.queuedIncoming.set(key, { controller: new AbortController(), settled: false })
     }
     this.sequence = this.sequence.then(() => this.dispatch(frame)).catch(error => this.fatal(error))
     return undefined
@@ -1279,9 +1297,14 @@ export class CompatHost {
     if (!operationKinds.has(frame.kind)) return this.fault(frame, new BridgeError('UNKNOWN_KIND', `unknown message kind ${frame.kind}`))
     if (frame.requestId === undefined || frame.requestId === 0n) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', `${frame.kind} requires nonzero requestId`))
     const key = frame.requestId.toString()
+    const request = this.queuedIncoming.get(key) ?? { controller: new AbortController(), settled: false }
+    this.queuedIncoming.delete(key)
     if (this.incoming.has(key)) return this.fault(frame, new BridgeError('DUPLICATE_REQUEST_ID', `request ${key} is already active`))
-    const request: Incoming = { controller: new AbortController(), settled: false }
     this.incoming.set(key, request)
+    if (request.settled) {
+      this.incoming.delete(key)
+      return
+    }
     try {
       const value = await this.operation(frame, request.controller.signal)
       this.log({ level: 'debug', message: ['dispatch:operation-done', frame.kind, frame.requestId.toString()] })
@@ -1313,14 +1336,13 @@ export class CompatHost {
     if (frame.kind === 'response') request.resolve(frame.payload)
     else request.reject(Object.assign(new BridgeError('REMOTE_ERROR', 'remote callback failed'), { details: frame.payload }))
   }
-
   private cancel(frame: Frame) {
     if (this.phase !== 'ready' || frame.connectionGeneration !== this.generation) return this.fault(frame, new BridgeError('GENERATION_MISMATCH', 'cancel belongs to another connection generation'))
     const legacy = frame.payload && typeof frame.payload === 'object' && !Array.isArray(frame.payload) ? frame.payload as RecordValue : undefined
     const target = frame.requestId ?? (typeof legacy?.requestId === 'number' && Number.isSafeInteger(legacy.requestId) ? BigInt(legacy.requestId) : undefined)
     if (target === undefined || target === 0n) return this.fault(frame, new BridgeError('INVALID_REQUEST_ID', 'cancel requires the target requestId'))
     const key = target.toString()
-    const incoming = this.incoming.get(key)
+    const incoming = this.incoming.get(key) ?? this.queuedIncoming.get(key)
     if (incoming && !incoming.settled) {
       incoming.settled = true
       incoming.controller.abort()

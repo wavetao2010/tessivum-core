@@ -64,6 +64,12 @@ pub enum CoreError {
     SetupFailed(String),
     /// One or more disposers failed after all cleanup was attempted.
     Cleanup(Vec<CoreError>),
+    /// Registration found a provider already visible in this realm.
+    ServiceAlreadyProvided { key: String },
+    /// Explicit replacement requires a currently visible provider.
+    ServiceNotProvided { key: String },
+    /// A staged provider's host generation changed before commit.
+    ServiceChanged { key: String },
     /// A typed lookup found a provider with a different Rust contract type.
     ServiceTypeMismatch { key: String },
     /// A service handle was used after its provider changed or was removed.
@@ -120,6 +126,13 @@ impl fmt::Display for CoreError {
             }
             Self::Cancelled => formatter.write_str("operation cancelled"),
             Self::SetupFailed(message) => formatter.write_str(message),
+            Self::ServiceAlreadyProvided { key } => {
+                write!(formatter, "service {key} is already provided")
+            }
+            Self::ServiceNotProvided { key } => write!(formatter, "service {key} is not provided"),
+            Self::ServiceChanged { key } => {
+                write!(formatter, "service {key} changed before commit")
+            }
             Self::ServiceTypeMismatch { key } => {
                 write!(formatter, "service {key} has a different Rust type")
             }

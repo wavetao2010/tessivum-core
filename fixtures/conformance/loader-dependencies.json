@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "loader.dependency-lifecycle",
+  "domain": "loader",
+  "scenario": "dependency-lifecycle",
+  "input": {
+    "cases": [
+      {"id": "pending"},
+      {"id": "provider-added"},
+      {"id": "provider-removed"},
+      {"id": "provider-restored"},
+      {"id": "unloaded"}
+    ]
+  },
+  "expectedTrace": [
+    {"event": "config-committed", "subject": "pending", "value": {"result": null}},
+    {"event": "config-committed", "subject": "provider-added", "value": {"result": {"value": "first"}}},
+    {"event": "config-committed", "subject": "provider-removed", "value": {"result": null}},
+    {"event": "config-committed", "subject": "provider-restored", "value": {"result": {"value": "second"}}},
+    {"event": "config-committed", "subject": "unloaded", "value": {"result": null}}
+  ]
+}

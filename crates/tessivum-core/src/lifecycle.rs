@@ -230,10 +230,22 @@ impl Scope {
         label: impl Into<String>,
         disposer: BoxDisposer,
     ) -> Result<ResourceId, CoreError> {
+        self.add_effect_with(label, || Ok(((), disposer)))
+            .map(|(id, ())| id)
+    }
+
+    /// Commits a resource and its cleanup under the same scope admission lock.
+    /// The setup must not invoke user callbacks or re-enter this scope.
+    pub(crate) fn add_effect_with<T>(
+        &self,
+        label: impl Into<String>,
+        setup: impl FnOnce() -> Result<(T, BoxDisposer), CoreError>,
+    ) -> Result<(ResourceId, T), CoreError> {
         let mut resources = lock(&self.inner.resources);
         if self.state() != FiberState::Active {
             return Err(self.invalid_state("register effect"));
         }
+        let (value, disposer) = setup()?;
 
         let id = next_resource_id();
         resources.effects.push(Effect {
@@ -244,7 +256,7 @@ impl Scope {
             },
             disposer,
         });
-        Ok(id)
+        Ok((id, value))
     }
 
     pub fn effects(&self) -> Vec<EffectMeta> {

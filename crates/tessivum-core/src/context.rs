@@ -97,8 +97,8 @@ impl ContextHandle {
         }
     }
 
-    pub(crate) fn commit_staged(&self) {
-        self.registry.commit();
+    pub(crate) fn commit_staged(&self) -> Result<(), CoreError> {
+        self.registry.commit()
     }
 
     /// Creates a child scope without changing service visibility.
@@ -154,34 +154,52 @@ impl ContextHandle {
         Value::Object(merged)
     }
 
-    /// Registers a typed provider whose removal is owned by this context's scope.
+    /// Registers a scope-owned provider; a visible provider in this realm is an error.
     pub fn provide<T>(&self, service: ServiceKey, value: T) -> Result<ServiceHandle<T>, CoreError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.publish_service(service, value, false)
+    }
+
+    /// Replaces an existing provider and transfers cleanup ownership to this scope.
+    /// Missing providers are errors. Successful replacement invalidates old handles.
+    pub fn replace<T>(&self, service: ServiceKey, value: T) -> Result<ServiceHandle<T>, CoreError>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.publish_service(service, value, true)
+    }
+
+    fn publish_service<T>(
+        &self,
+        service: ServiceKey,
+        value: T,
+        replace: bool,
+    ) -> Result<ServiceHandle<T>, CoreError>
     where
         T: Send + Sync + 'static,
     {
         let resolved = self.resolve(&service);
         let value = Arc::new(value);
         let erased: Arc<dyn Any + Send + Sync> = value.clone();
-        let generation = self
-            .registry
-            .provide(resolved.clone(), self.scope.id(), erased);
-
-        let registry = Arc::clone(&self.registry);
-        let cleanup_service = resolved.clone();
-        let effect: BoxDisposer = Box::new(move || {
-            Box::pin(async move {
-                registry.remove_if_current(&cleanup_service, generation);
-                Ok(())
-            })
-        });
-        if let Err(error) = self
-            .scope
-            .add_effect(format!("service:{}", service.diagnostic_key()), effect)
-        {
-            self.registry.remove_if_current(&resolved, generation);
-            return Err(error);
-        }
-
+        let (_, (generation, retired)) =
+            self.scope
+                .add_effect_with(format!("service:{}", service.diagnostic_key()), || {
+                    let (generation, retired) =
+                        self.registry.provide(resolved.clone(), erased, replace)?;
+                    let registry = Arc::clone(&self.registry);
+                    let cleanup_service = resolved.clone();
+                    let effect: BoxDisposer = Box::new(move || {
+                        Box::pin(async move {
+                            registry.remove_if_current(&cleanup_service, generation);
+                            Ok(())
+                        })
+                    });
+                    Ok(((generation, retired), effect))
+                })?;
+        drop(retired);
+        self.registry.notify(&resolved);
         Ok(ServiceHandle {
             registry: Arc::downgrade(&self.registry),
             service: resolved,
@@ -283,5 +301,85 @@ impl ContextHandle {
             key: service.clone(),
             realm: self.realms.get(service).cloned().unwrap_or(Realm::Root),
         }
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn staged_conflict_preserves_host_and_never_commits_a_partial_candidate() {
+        let host = ContextHandle::root();
+        let key = ServiceKey::new("current", "test/v1");
+        let extra = ServiceKey::new("candidate-only", "test/v1");
+        let original = host.provide(key.clone(), 1_u8).unwrap();
+        let candidate = host.child().unwrap().staged();
+        assert!(matches!(
+            candidate.provide(key.clone(), 2_u8),
+            Err(CoreError::ServiceAlreadyProvided { .. })
+        ));
+        candidate.replace(key.clone(), 2_u8).unwrap();
+        candidate.provide(extra.clone(), 9_u8).unwrap();
+        assert_eq!(original.with(|value| *value), Ok(1));
+        assert!(host.get::<u8>(&extra).unwrap().is_none());
+        let concurrent = host.replace(key.clone(), 3_u8).unwrap();
+        assert!(matches!(
+            candidate.commit_staged(),
+            Err(CoreError::ServiceChanged { .. })
+        ));
+        assert_eq!(concurrent.with(|value| *value), Ok(3));
+        assert!(host.get::<u8>(&extra).unwrap().is_none());
+        candidate.scope().dispose().await.unwrap();
+        assert_eq!(concurrent.with(|value| *value), Ok(3));
+        host.scope().dispose().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn staged_commit_is_visible_before_notifications_and_keeps_registration_strict() {
+        let host = ContextHandle::root();
+        let key = ServiceKey::new("current", "test/v1");
+        let extra = ServiceKey::new("candidate-only", "test/v1");
+        let old_owner = host.child().unwrap();
+        let old = old_owner.provide(key.clone(), 1_u8).unwrap();
+        let candidate = host.child().unwrap().staged();
+        let updated = candidate.replace(key.clone(), 2_u8).unwrap();
+        candidate.provide(extra.clone(), 9_u8).unwrap();
+        let observer = host.clone();
+        let extra_key = extra.clone();
+        let subscription = host
+            .subscribe(vec![Dependency::Required(key.clone())], move |snapshot| {
+                if snapshot.services[0].generation != Some(old.generation()) {
+                    assert_eq!(
+                        observer
+                            .get::<u8>(&extra_key)
+                            .unwrap()
+                            .unwrap()
+                            .with(|v| *v),
+                        Ok(9)
+                    );
+                }
+            })
+            .unwrap();
+        candidate.commit_staged().unwrap();
+        old_owner.scope().dispose().await.unwrap();
+        assert_eq!(updated.with(|value| *value), Ok(2));
+        assert!(matches!(
+            candidate.provide(key.clone(), 4_u8),
+            Err(CoreError::ServiceAlreadyProvided { .. })
+        ));
+        let latest = candidate.replace(key.clone(), 4_u8).unwrap();
+        assert_eq!(
+            host.get::<u8>(&key).unwrap().unwrap().with(|value| *value),
+            Ok(4)
+        );
+        assert!(matches!(
+            updated.with(|value| *value),
+            Err(CoreError::StaleServiceHandle { .. })
+        ));
+        // Stop the observation before cleanup removes the candidate-only service.
+        subscription.unsubscribe();
+        host.scope().dispose().await.unwrap();
+        assert!(!latest.is_current());
     }
 }

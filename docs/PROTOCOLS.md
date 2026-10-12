@@ -170,7 +170,7 @@ The default maximum JSON frame body is 1,048,576 bytes. Both endpoints reject
 an oversized declared length before allocating its body, reject empty frames,
 require valid UTF-8 and JSON, and reject an invalid version, generation, or
 request-ID placement. A `FrameCodec` can set another positive u32 limit; the
-compat-host reads `CORDIS_NODE_MAX_FRAME_BYTES` for its limit.
+The compat-host reads `TESSIVUM_BRIDGE_MAX_FRAME_SIZE` for its limit.
 
 ### Kinds and request IDs
 

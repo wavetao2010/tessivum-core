@@ -37,6 +37,7 @@ fn provider_schema() -> NativeConfigSchema {
 struct Provider {
     label: &'static str,
     log: Log,
+    replacing: bool,
 }
 
 impl NativePlugin for Provider {
@@ -55,11 +56,18 @@ impl NativePlugin for Provider {
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
         let label = self.label;
+        let replacing = self.replacing;
         let log = Arc::clone(&self.log);
         Box::pin(async move {
-            context
-                .provide(greeting_service(), Greeting(label))
-                .expect("provider service belongs to its transaction");
+            if replacing {
+                context
+                    .replace(greeting_service(), Greeting(label))
+                    .expect("provider service belongs to its transaction");
+            } else {
+                context
+                    .provide(greeting_service(), Greeting(label))
+                    .expect("provider service belongs to its transaction");
+            }
             log.lock()
                 .expect("example log is available")
                 .push(format!("provider:{label}"));
@@ -72,6 +80,7 @@ impl NativePlugin for Provider {
         _context: ContextHandle,
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
+        self.replacing = true;
         Box::pin(async { Ok(()) })
     }
 
@@ -216,6 +225,7 @@ async fn main() {
             move || Provider {
                 label: "v1",
                 log: Arc::clone(&log),
+                replacing: false,
             }
         })
         .expect("provider v1 factory registers");
@@ -225,6 +235,7 @@ async fn main() {
             move || Provider {
                 label: "v2",
                 log: Arc::clone(&log),
+                replacing: false,
             }
         })
         .expect("provider v2 factory registers");

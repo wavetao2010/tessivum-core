@@ -2,7 +2,21 @@
 
 ## Scope and authority
 
-M0 defines a language-neutral behavioral baseline before the Rust framework exists. For a supported fixture, the TypeScript oracle runs the Harness-vendored Cordis behavior and emits its normalized trace. The Rust runner validates the fixture and returns `NOT_IMPLEMENTED`; it does not claim equivalence yet. Loader scenarios are deliberately unsupported in M0 and the TypeScript oracle returns `UNSUPPORTED_SCENARIO` for them.
+M0 defines the language-neutral behavioral baseline before the Rust framework exists. The current C1 runner extends that baseline with executable Core catalogs; the historical M0 wording below remains the contract origin, not the current coverage claim.
+
+### Current execution status (C1, 2026-10-10)
+
+The Rust `conformance` binary and TypeScript oracle execute lifecycle, service, event, Loader dependency, and Loader catalog fixtures. Every declared case runs independently through public Rust APIs or the Harness-vendored Loader implementation; normalized traces compare at settled behavioral boundaries.
+
+`fixtures/conformance/loader-dependencies.json` compares settled consumer-service visibility across missing dependency, provider arrival, provider removal, restoration with a new value, and unload. The upstream runner uses real Loader builtins; Rust uses `NativePluginRuntime`. Rust tree replacement and upstream entry mutation are compared only at settled boundaries. `config-committed` records identify the operation in `subject` and its observed consumer result in `value`.
+
+`fixtures/conformance/loader.json` compares ten Loader cases: dependency ordering, duplicate IDs, ordered insert/update/remove/move patches, config-only updates, replacement, candidate rollback, rollback failure reporting, nested groups, later targeting of inserted entries, and atomic Include persistence. The TS cases use real Loader/Group/Include code and the Rust cases use the public Loader API. Both runners reject unknown, empty, or malformed case lists.
+
+`fixtures/conformance/events.json` uses `event/event-catalog`; the obsolete `event/emit` scenario is unsupported, not an alias. Its 11 cases each emit one normalized `event-dispatched` record. Parallel completion labels are sorted to avoid asserting scheduler order; other callbacks retain execution order.
+
+`fixtures/conformance/services.json` uses `service/service-catalog`: each declared service case emits one normalized `service-provided` observation. The catalog covers late and optional dependencies, replacement/removal/recovery, duplicate registration, isolated/shared realms, intercept precedence, and stale generations. Unknown, empty, or malformed case lists fail instead of being silently ignored.
+
+`fixtures/conformance/lifecycle.json` uses `lifecycle/lifecycle-catalog`: each declared lifecycle case emits one normalized `effect-disposed` observation. The catalog covers startup, sync/async cleanup, iterable and nested effects, reverse/repeated/reentrant disposal, rollback, parent-child quiescence, and unload-time registration rejection. Unknown, empty, or malformed case lists fail instead of being silently ignored.
 
 When sources disagree, resolve behavior in this order:
 
@@ -116,11 +130,15 @@ Listener ownership ends with scope disposal. Registration order is stable, excep
 | `bail` | Uses Cordis synchronous bail behavior. |
 | `waterfall` | Advances only when the current listener calls `next`; short-circuit and wrapping follow Cordis. |
 
-Scoped filters, self-removal, owner disposal during dispatch, and `prepend` are observable cases. The trace records dispatch and listener ownership, not host callback internals.
-
 ### Loader
 
-`loader` fixtures remain part of the shared schema to reserve the future contract, including `config-committed` and `config-rolled-back`. M0 does **not** execute them: the TypeScript oracle returns `UNSUPPORTED_SCENARIO`, and the Rust runner remains `NOT_IMPLEMENTED`. Later Loader work must validate candidates detached, preserve the last known-good tree on failure, and report rollback failures rather than masking them.
+- Loader candidates are applied transactionally; a failed candidate leaves the last known-good tree active.
+- Duplicate IDs reject before mutation. Ordered insert, update, remove, and move patches commit in order, and later patches may target entries inserted earlier in the same update.
+- Config-only updates patch an active entry without replacing its plugin. Replacement updates dispose the old plugin before activating the new one.
+- Nested groups preserve qualified entry resolution and child activation. Include writes use a temporary file followed by rename; an unfinished temporary file is not a committed configuration.
+- Candidate and rollback failures remain observable; rollback errors are aggregated instead of masking the original failure.
+
+The Loader catalog is executable in C1. Arbitrary JavaScript configuration evaluation and cross-runtime handles remain outside the language-neutral Rust contract.
 
 ## Deterministic limitations
 
@@ -130,7 +148,7 @@ M0 intentionally does not compare:
 - stack traces, source paths, host error classes, memory addresses, object identity, or generated runtime IDs;
 - JavaScript `Proxy`, prototype, `this` binding, declaration-merging, or callback implementation details;
 - the ordering of parallel listener completion beyond any Cordis-guaranteed aggregate result;
-- Loader execution, arbitrary JavaScript configuration evaluation, cross-runtime handles, or native/WASM behavior.
+- arbitrary JavaScript configuration evaluation, cross-runtime handles, or native/WASM behavior.
 
 Those omissions are not permission to weaken lifecycle, service-realm, or Cordis event semantics. If a future fixture must rely on one, first make a stable, language-neutral observation and version this contract.
 
@@ -143,8 +161,8 @@ Those omissions are not permission to weaken lifecycle, service-realm, or Cordis
 | Async cleanup quiescence | normative baseline | Parent completion waits for child and async cleanup settlement. |
 | Unload-time effect escape rejection | normative baseline | Unloading cannot register an effect that outlives the scope. |
 | Parent/child fiber release order | normative baseline | Nested children are cleaned before the parent, with reverse nested registration order. |
-| Lazy config resolution | recorded; Loader unsupported in M0 | It is a Loader semantic, preserved as an anchor without pretending M0 executes it. |
-| Loader/Include/Group transactional update and rollback | recorded; Loader unsupported in M0 | Future Loader conformance must preserve last good state and expose rollback failure. |
+| Lazy config resolution | recorded; arbitrary JS remains outside C1 | Loader catalog covers safe builtins and file persistence without comparing arbitrary JavaScript evaluation. |
+| Loader/Include/Group transactional update and rollback | normative C1 baseline | Candidate failure preserves the last known-good tree; rollback errors remain observable. |
 
 Changing a ledger row's contract, source revision, or status requires increasing the ledger version and recording the reason in the change that updates it.
 
@@ -153,8 +171,8 @@ Changing a ledger row's contract, source revision, or status requires increasing
 Run from the repository root with a single fixture path:
 
 ```sh
-bun run oracle/run.ts fixtures/conformance/<fixture>.json
-cargo run -p tessivum-core --bin conformance-runner -- fixtures/conformance/<fixture>.json
+bun run oracle/src/index.ts fixtures/conformance/<fixture>.json
+cargo run -p tessivum-core --bin conformance -- fixtures/conformance/<fixture>.json
 ```
 
-The first command is the M0 behavioral oracle for supported lifecycle, service, and event scenarios. The second validates the same schema and then returns `NOT_IMPLEMENTED`. Do not treat an M0 Loader result as a pass: it is intentionally `UNSUPPORTED_SCENARIO`.
+Both runners compare supported traces. Use `loader-dependencies.json` for dependency lifecycle and `loader.json` for the ten-case Loader catalog. Set `CORDIS_VENDOR_ROOT` for a relocated pinned Harness vendor checkout; see [`../oracle/README.md`](../oracle/README.md). Unsupported results must never count as differential passes.

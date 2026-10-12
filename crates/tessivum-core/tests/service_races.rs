@@ -41,7 +41,7 @@ fn required_consumer_reloads_when_a_provider_is_replaced() {
         .generation
         .expect("first provider has a generation");
     context
-        .provide(session.clone(), Named("replacement"))
+        .replace(session.clone(), Named("replacement"))
         .expect("replacement provider registration succeeds");
     let replacement_generation = context
         .snapshot(&session)

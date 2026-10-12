@@ -77,6 +77,7 @@ struct Notice(&'static str);
 struct Provider {
     label: &'static str,
     log: SharedLog,
+    replacing: bool,
 }
 
 impl NativePlugin for Provider {
@@ -95,11 +96,14 @@ impl NativePlugin for Provider {
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
         let label = self.label;
+        let replacing = self.replacing;
         let log = Arc::clone(&self.log);
         Box::pin(async move {
-            context
-                .provide(provider_service(), ProviderService(label))
-                .expect("provider service registers in its scoped transaction");
+            if replacing {
+                context.replace(provider_service(), ProviderService(label))?;
+            } else {
+                context.provide(provider_service(), ProviderService(label))?;
+            }
             log.lock()
                 .expect("provider log is available")
                 .starts
@@ -113,6 +117,7 @@ impl NativePlugin for Provider {
         _context: ContextHandle,
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
+        self.replacing = true;
         Box::pin(async { Ok(()) })
     }
 
@@ -337,6 +342,7 @@ impl Drop for DropTrackedService {
 
 struct DropTrackedProvider {
     drops: Arc<AtomicUsize>,
+    replacing: bool,
 }
 
 impl NativePlugin for DropTrackedProvider {
@@ -354,12 +360,21 @@ impl NativePlugin for DropTrackedProvider {
         context: ContextHandle,
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
+        let replacing = self.replacing;
         let drops = Arc::clone(&self.drops);
         Box::pin(async move {
-            context.provide(
-                ServiceKey::new("drop-tracked.service", "native/v1"),
-                DropTrackedService(drops),
-            )?;
+            let service = DropTrackedService(drops);
+            if replacing {
+                context.replace(
+                    ServiceKey::new("drop-tracked.service", "native/v1"),
+                    service,
+                )?;
+            } else {
+                context.provide(
+                    ServiceKey::new("drop-tracked.service", "native/v1"),
+                    service,
+                )?;
+            }
             Ok(())
         })
     }
@@ -369,6 +384,7 @@ impl NativePlugin for DropTrackedProvider {
         _context: ContextHandle,
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
+        self.replacing = true;
         Box::pin(async { Ok(()) })
     }
 
@@ -376,7 +392,6 @@ impl NativePlugin for DropTrackedProvider {
         Box::pin(async { Ok(()) })
     }
 }
-
 struct FailingUpdatePlugin {
     started: tokio::sync::mpsc::UnboundedSender<()>,
     failed_updates: tokio::sync::mpsc::UnboundedSender<()>,
@@ -423,7 +438,7 @@ impl NativePlugin for FailingUpdatePlugin {
     ) -> NativePluginFuture<'a> {
         let failed_updates = self.failed_updates.clone();
         Box::pin(async move {
-            context.provide(managed_service(), ManagedService("candidate"))?;
+            context.replace(managed_service(), ManagedService("candidate"))?;
             let _ = failed_updates.send(());
             Err(NativePluginError::Runtime {
                 package: "failing-update".into(),
@@ -436,10 +451,10 @@ impl NativePlugin for FailingUpdatePlugin {
         Box::pin(async { Ok(()) })
     }
 }
-
 struct StopFailingUpdatePlugin {
     label: &'static str,
     resource_disposals: Arc<AtomicUsize>,
+    replacing: bool,
 }
 
 impl NativePlugin for StopFailingUpdatePlugin {
@@ -458,9 +473,14 @@ impl NativePlugin for StopFailingUpdatePlugin {
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
         let label = self.label;
+        let replacing = self.replacing;
         let resource_disposals = Arc::clone(&self.resource_disposals);
         Box::pin(async move {
-            context.provide(managed_service(), ManagedService(label))?;
+            if replacing {
+                context.replace(managed_service(), ManagedService(label))?;
+            } else {
+                context.provide(managed_service(), ManagedService(label))?;
+            }
             context.scope().add_effect(
                 "stop-failure-resource",
                 Box::new(move || {
@@ -479,6 +499,7 @@ impl NativePlugin for StopFailingUpdatePlugin {
         _context: ContextHandle,
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
+        self.replacing = true;
         Box::pin(async { Ok(()) })
     }
 
@@ -496,8 +517,9 @@ impl NativePlugin for StopFailingUpdatePlugin {
         })
     }
 }
-
-struct FailingPlugin;
+struct FailingPlugin {
+    replacing: bool,
+}
 
 impl NativePlugin for FailingPlugin {
     fn descriptor(&self) -> NativePluginDescriptor {
@@ -514,11 +536,14 @@ impl NativePlugin for FailingPlugin {
         context: ContextHandle,
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
+        let replacing = self.replacing;
         Box::pin(async move {
             let key = ServiceKey::new("failing.service", "native/v1");
-            context
-                .provide(key.clone(), 1_u8)
-                .expect("failing transaction registers its provisional service");
+            if replacing {
+                context.replace(key.clone(), 1_u8)?;
+            } else {
+                context.provide(key.clone(), 1_u8)?;
+            }
             match context.get::<String>(&key) {
                 Err(error) => Err(NativePluginError::Core(error)),
                 Ok(_) => panic!("the provisional service intentionally has the wrong type"),
@@ -531,6 +556,7 @@ impl NativePlugin for FailingPlugin {
         _context: ContextHandle,
         _config: &'a Value,
     ) -> NativePluginFuture<'a> {
+        self.replacing = true;
         Box::pin(async { Ok(()) })
     }
 
@@ -635,6 +661,7 @@ async fn native_instance_waits_for_a_required_provider_before_starting() {
                 Box::new(Provider {
                     label: "direct",
                     log: Arc::clone(&log),
+                    replacing: false,
                 }) as Box<dyn NativePlugin>
             }
         }),
@@ -763,6 +790,7 @@ async fn native_loader_runs_provider_consumer_removal_replacement_and_root_dispo
             move || Provider {
                 label: "v1",
                 log: Arc::clone(&log),
+                replacing: false,
             }
         })
         .expect("provider v1 factory registers");
@@ -772,6 +800,7 @@ async fn native_loader_runs_provider_consumer_removal_replacement_and_root_dispo
             move || Provider {
                 label: "v2",
                 log: Arc::clone(&log),
+                replacing: false,
             }
         })
         .expect("provider v2 factory registers");
@@ -1010,7 +1039,7 @@ async fn managed_native_rejected_update_retains_old_service_and_resource() {
         .expect("initial managed plugin starts")
         .expect("initial start event arrives");
 
-    root.provide(managed_dependency_service(), 2_u8)
+    root.replace(managed_dependency_service(), 2_u8)
         .expect("dependency generation changes");
     tokio::time::timeout(Duration::from_secs(1), failed_update_events.recv())
         .await
@@ -1054,6 +1083,7 @@ async fn native_update_waits_for_missing_required_dependency_and_cancels() {
                 Box::new(Provider {
                     label: "gate",
                     log: Arc::clone(&log),
+                    replacing: false,
                 }) as Box<dyn NativePlugin>
             }
         }),
@@ -1117,6 +1147,7 @@ async fn native_update_keeps_candidate_live_when_old_stop_fails() {
             Box::new(StopFailingUpdatePlugin {
                 label,
                 resource_disposals: Arc::clone(&resource_disposals),
+                replacing: false,
             }) as Box<dyn NativePlugin>
         }
     });
@@ -1170,6 +1201,7 @@ async fn committed_staged_provider_drops_after_instance_disposal() {
         move || {
             Box::new(DropTrackedProvider {
                 drops: Arc::clone(&drops),
+                replacing: false,
             }) as Box<dyn NativePlugin>
         }
     });
@@ -1223,7 +1255,7 @@ async fn native_direct_instances_validate_rollback_update_and_dispose_without_re
 
     let failed_root = ContextHandle::root();
     let mut failed = NativePluginInstance::instantiate(
-        Arc::new(|| Box::new(FailingPlugin) as Box<dyn NativePlugin>),
+        Arc::new(|| Box::new(FailingPlugin { replacing: false }) as Box<dyn NativePlugin>),
         failed_root.clone(),
         Value::Null,
     )

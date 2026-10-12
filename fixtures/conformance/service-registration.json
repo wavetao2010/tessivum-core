@@ -1,0 +1,18 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "service.registration",
+  "domain": "service",
+  "scenario": "registration",
+  "input": {
+    "cases": [
+      {"id": "same-owner-duplicate"},
+      {"id": "different-owner-duplicate"},
+      {"id": "dispose-then-reprovide"}
+    ]
+  },
+  "expectedTrace": [
+    {"event": "service-provided", "subject": "same-owner-duplicate", "phase": "registration", "value": {"duplicateRejected": true, "visible": "first"}},
+    {"event": "service-provided", "subject": "different-owner-duplicate", "phase": "registration", "value": {"duplicateRejected": true, "visible": "first"}},
+    {"event": "service-provided", "subject": "dispose-then-reprovide", "phase": "registration", "value": {"missingAfterDispose": true, "visible": "second"}}
+  ]
+}

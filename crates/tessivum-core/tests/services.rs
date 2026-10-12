@@ -104,7 +104,7 @@ fn replacement_advances_generation_and_rejects_every_old_handle() {
         .expect("visible provider has a generation");
 
     let replacement = context
-        .provide(theme.clone(), Named("dark"))
+        .replace(theme.clone(), Named("dark"))
         .expect("replacement registration succeeds");
     let replacement_snapshot = context.snapshot(&theme);
     let replacement_generation = replacement_snapshot
@@ -165,7 +165,7 @@ fn notifications_and_diagnostic_snapshots_follow_provider_commits() {
         .generation
         .expect("first provider has a generation");
     context
-        .provide(cache.clone(), Named("second"))
+        .replace(cache.clone(), Named("second"))
         .expect("cache replacement succeeds");
     let latest = context.snapshot(&cache);
     let latest_generation = latest.generation.expect("replacement has a generation");

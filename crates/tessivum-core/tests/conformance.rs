@@ -16,6 +16,8 @@ fn full_catalog_executes_every_declared_case() {
         "services.json",
         "events.json",
         "loader.json",
+        "loader-dependencies.json",
+        "service-registration.json",
     ] {
         let fixture_document: Value = serde_json::from_slice(
             &fs::read(fixture(name)).unwrap_or_else(|error| panic!("{name} is readable: {error}")),
@@ -43,37 +45,40 @@ fn full_catalog_executes_every_declared_case() {
             .unwrap_or_else(|error| panic!("{name} emitted invalid JSON: {error}"));
         assert_eq!(result["status"], "PASS", "{name}: {result}");
         assert_eq!(result["executedCases"], expected_cases, "{name}: {result}");
-        assert_ne!(result["status"], "NOT_IMPLEMENTED", "{name}: {result}");
     }
 }
 
 #[test]
-fn empty_oracle_baseline_is_rejected_outside_loader() {
-    let mut document: Value = serde_json::from_slice(
-        &fs::read(fixture("lifecycle.json")).expect("lifecycle fixture is readable"),
-    )
-    .expect("lifecycle fixture is valid JSON");
-    document["expectedTrace"] = Value::Array(Vec::new());
-    let path = std::env::temp_dir().join(format!(
-        "tessivum-conformance-empty-baseline-{}.json",
-        std::process::id()
-    ));
-    fs::write(
-        &path,
-        serde_json::to_vec(&document).expect("fixture serializes"),
-    )
-    .expect("temporary fixture writes");
-    let output = Command::new(env!("CARGO_BIN_EXE_conformance"))
-        .arg(&path)
-        .output();
-    let _ = fs::remove_file(&path);
-    let output = output.expect("conformance runner starts");
-    let result: Value =
-        serde_json::from_slice(&output.stdout).expect("conformance runner emits JSON");
-    assert!(
-        !output.status.success(),
-        "non-Loader empty baseline must fail validation: {result}"
-    );
-    assert_eq!(result["status"], "INVALID_FIXTURE", "{result}");
-    assert_eq!(result["error"]["code"], "INVALID_FIXTURE", "{result}");
+fn empty_oracle_baseline_never_passes() {
+    for (name, status, code) in [
+        ("lifecycle.json", "INVALID_FIXTURE", "INVALID_FIXTURE"),
+        ("loader.json", "MISMATCH", "TRACE_MISMATCH"),
+    ] {
+        let mut document: Value =
+            serde_json::from_slice(&fs::read(fixture(name)).expect("fixture is readable"))
+                .expect("fixture is valid JSON");
+        document["expectedTrace"] = Value::Array(Vec::new());
+        let path = std::env::temp_dir().join(format!(
+            "tessivum-conformance-empty-baseline-{}-{name}",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            serde_json::to_vec(&document).expect("fixture serializes"),
+        )
+        .expect("temporary fixture writes");
+        let output = Command::new(env!("CARGO_BIN_EXE_conformance"))
+            .arg(&path)
+            .output();
+        let _ = fs::remove_file(&path);
+        let output = output.expect("conformance runner starts");
+        let result: Value =
+            serde_json::from_slice(&output.stdout).expect("conformance runner emits JSON");
+        assert!(
+            !output.status.success(),
+            "{name} empty baseline must fail: {result}"
+        );
+        assert_eq!(result["status"], status, "{result}");
+        assert_eq!(result["error"]["code"], code, "{result}");
+    }
 }

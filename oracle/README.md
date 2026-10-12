@@ -1,24 +1,28 @@
-# M0 TypeScript Oracle
+# TypeScript Conformance Oracle
 
-The oracle is the M0 reference executor for shared conformance fixtures. It runs the Harness-vendored Cordis baseline, normalizes observable behavior, and compares the resulting ordered trace with `expectedTrace`.
+The oracle runs the Harness-vendored Cordis and Loader baseline, normalizes observable behavior, and compares the resulting ordered trace with `expectedTrace`. C1 covers lifecycle, services, events, Loader dependency lifecycle, and the ten-case Loader catalog.
 
 ## Run
 
 From the repository root:
 
 ```sh
-bun run oracle/run.ts fixtures/conformance/<fixture>.json
+bun run oracle/src/index.ts fixtures/conformance/<fixture>.json
 ```
 
-Use one fixture per invocation. A supported `lifecycle`, `service`, or `event` scenario produces the normalized trace or a fixture-specific mismatch. A `loader` fixture returns `UNSUPPORTED_SCENARIO`: Loader is intentionally outside M0.
+Use one fixture per invocation. Supported scenarios are `lifecycle/lifecycle-catalog`, `lifecycle/effect-dispose`, `service/service-catalog`, `service/registration`, `service/isolate-realm`, `event/event-catalog`, `loader/dependency-lifecycle`, and `loader/loader-catalog`. The former `event/emit` scenario remains unsupported, not an alias.
 
-The Rust companion command is intentionally not an oracle in M0:
+Run the Rust companion against the same fixture:
 
 ```sh
-cargo run -p tessivum-core --bin conformance-runner -- fixtures/conformance/<fixture>.json
+cargo run -p tessivum-core --bin conformance -- fixtures/conformance/<fixture>.json
 ```
 
-It validates the fixture schema and returns `NOT_IMPLEMENTED`.
+`loader-dependencies.json` runs real upstream Loader plugins and Rust Native plugins through waiting, provider arrival, removal, restoration, and unload. `loader.json` runs real upstream Loader/Group/Include cases against Rust's public Loader API: dependencies, duplicate IDs, ordered patches, config updates, replacement, candidate and rollback failures, nested groups, later patch targeting, and atomic persistence. Both compare normalized observations at settled boundaries.
+
+`events.json` executes all 11 declared cases on both sides: emit order, parallel error aggregation, serial/synchronous bail, waterfall next/veto/wrapping, prepend, scoped filtering, self-removal, and owner disposal during dispatch. Each case emits one `event-dispatched` observation with its case ID, mode, and actual calls/results. Only parallel completion labels are sorted; ordered callbacks and dispatch snapshots retain their order. Empty, malformed, or unknown cases are errors. Run the ignored-case regression with `bun test oracle/src/scenarios.test.ts` from the Core root.
+
+Source resolution is relative to this module by default (`../upstream/deepseek-harness/vendor` from the Core root), not to the working directory. For another checkout location, set `CORDIS_VENDOR_ROOT` to the pinned Harness `vendor` directory (or its `cordis` child). Loader sources are read from the sibling `loader` directory. Install the upstream workspace dependencies first; the override selects a checkout, it does not verify its revision.
 
 ## Contract
 

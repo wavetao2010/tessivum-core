@@ -6,6 +6,15 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## Unreleased
+
+- Make `ContextHandle::provide` strict: duplicate visible keys return `ServiceAlreadyProvided`; add explicit `ContextHandle::replace` with generation-safe replacement and staged commit conflict detection.
+- Add service-catalog conformance coverage: every declared dependency, realm, interception, replacement, removal, duplicate, and stale-generation case now runs independently in both runners with strict invalid-case rejection.
+- Add lifecycle-catalog conformance coverage: startup, cleanup, nested scopes, rollback, repeated/reentrant disposal, quiescence, and unload registration now execute independently in both runners.
+- Preserve managed Native Loader consumers in `Pending` when a required provider is absent; do not mistake a dependency wait for a failed activation transaction. Actual activation failures retain rollback behavior.
+- Add paired upstream Loader/Group/Include and Rust Loader catalog conformance: ten cases cover dependency ordering, duplicate IDs, ordered patches, config updates, replacement, candidate and rollback failures, nested groups, later patch targeting, and atomic persistence.
+- Execute every declared event catalog case in both conformance runners instead of allowing TS to ignore the case list. Migrate `event/emit` to `event/event-catalog` with 11 observed call/result traces and strict case validation; add an oracle regression for per-case execution and mismatch rejection. Production event APIs are unchanged.
+
 ## 0.1.8 — 2026-09-24
 
 ### Legacy Node compatibility host

@@ -2,31 +2,33 @@
   "schemaVersion": "tessivum.conformance/v1",
   "name": "event.core-catalog",
   "domain": "event",
-  "scenario": "emit",
+  "scenario": "event-catalog",
   "input": {
-    "event": "emit.event",
-    "mode": "emit",
-    "listeners": [{"label": "first"}, {"label": "second"}],
     "cases": [
-      {"id": "emit-ordering", "mode": "emit", "listeners": ["first", "second"]},
-      {"id": "parallel-aggregate", "mode": "parallel", "listeners": ["left", "right"]},
-      {"id": "serial-bail", "mode": "serial", "bail": "stop"},
-      {"id": "sync-bail", "mode": "bail", "bail": "stop"},
-      {"id": "waterfall-next", "mode": "waterfall"},
-      {"id": "waterfall-short-circuit", "mode": "waterfall"},
-      {"id": "waterfall-wrap", "mode": "waterfall"},
-      {"id": "prepend", "mode": "emit"},
-      {"id": "scoped-filter", "mode": "emit"},
-      {"id": "listener-self-removal", "mode": "emit"},
-      {"id": "owner-disposal-during-dispatch", "mode": "emit"}
+      {"id": "emit-ordering"},
+      {"id": "parallel-aggregate"},
+      {"id": "serial-bail"},
+      {"id": "sync-bail"},
+      {"id": "waterfall-next"},
+      {"id": "waterfall-short-circuit"},
+      {"id": "waterfall-wrap"},
+      {"id": "prepend"},
+      {"id": "scoped-filter"},
+      {"id": "listener-self-removal"},
+      {"id": "owner-disposal-during-dispatch"}
     ]
   },
   "expectedTrace": [
-    {"event": "listener-added", "subject": "emit.event", "label": "first"},
-    {"event": "listener-added", "subject": "emit.event", "label": "second"},
-    {"event": "event-dispatched", "subject": "emit.event", "label": "first", "phase": "emit"},
-    {"event": "event-dispatched", "subject": "emit.event", "label": "second", "phase": "emit"},
-    {"event": "listener-removed", "subject": "emit.event", "label": "second"},
-    {"event": "listener-removed", "subject": "emit.event", "label": "first"}
+    {"event": "event-dispatched", "subject": "emit-ordering", "phase": "emit", "value": {"calls": ["first", "second"]}},
+    {"event": "event-dispatched", "subject": "parallel-aggregate", "phase": "parallel", "value": {"calls": ["first", "second", "third"], "errors": 2}},
+    {"event": "event-dispatched", "subject": "serial-bail", "phase": "serial", "value": {"calls": ["null", "false", "stop"], "result": "stop"}},
+    {"event": "event-dispatched", "subject": "sync-bail", "phase": "bail", "value": {"calls": ["null", "false", "stop"], "result": "stop"}},
+    {"event": "event-dispatched", "subject": "waterfall-next", "phase": "waterfall", "value": {"calls": ["first", "second"], "result": {"next": "start"}}},
+    {"event": "event-dispatched", "subject": "waterfall-short-circuit", "phase": "waterfall", "value": {"calls": ["veto"], "result": {"veto": "blocked"}}},
+    {"event": "event-dispatched", "subject": "waterfall-wrap", "phase": "waterfall", "value": {"calls": ["before", "terminal", "after"], "result": {"outer": {"terminal": {"inner": "start"}}}}},
+    {"event": "event-dispatched", "subject": "prepend", "phase": "emit", "value": {"calls": ["prepend", "first", "second"]}},
+    {"event": "event-dispatched", "subject": "scoped-filter", "phase": "emit", "value": {"calls": ["alpha"]}},
+    {"event": "event-dispatched", "subject": "listener-self-removal", "phase": "emit", "value": {"dispatches": [["self", "stable"], ["stable"]]}},
+    {"event": "event-dispatched", "subject": "owner-disposal-during-dispatch", "phase": "serial", "value": {"dispatches": [["dispose", "downstream"], []]}}
   ]
 }
