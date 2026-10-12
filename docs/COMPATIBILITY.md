@@ -7,7 +7,7 @@ contract:
 
 | Coordinate | Current value | Rule |
 | --- | --- | --- |
-| Repository source release / Rust runtime crates | `0.1.8` | All workspace runtime crates are MIT-licensed and released together with `publish = false`; this is a repository source release, not a crates.io registry publication. |
+| Repository source candidate / Rust runtime crates | `0.2.0` (unreleased) | All workspace runtime crates are MIT-licensed and versioned together with `publish = false`; publication is a repository source release, not a crates.io registry publication. |
 | Conformance fixture schema | `tessivum.conformance/v1` | Fixture documents must use the exact schema version. |
 | WASM ABI | `cordis.plugin/v1` | The Extism host accepts this exact string only. |
 | Node bridge | `cordis.node/v1` | Rust and Bun endpoints require this exact string before requests. |
@@ -20,8 +20,8 @@ bridge upgrade.
 
 ## Release-version policy
 
-`0.1.x` is the first public release line. The API is usable but still in the
-pre-1.0 convergence period described by `docs/DEVELOPMENT_PLAN.md`.
+`0.1.x` was the first public release line. The unreleased `0.2.0` candidate
+remains pre-1.0 and introduces the explicit service-replacement contract below.
 
 - A patch release (`0.1.x` → `0.1.x+1`) preserves the documented Rust public
   APIs and the exact v1 wire semantics. It may fix a defect, tighten rejection
@@ -40,6 +40,36 @@ pre-1.0 convergence period described by `docs/DEVELOPMENT_PLAN.md`.
 This policy is prospective release policy. The current implementation supports
 only the exact versions in the table above; it does not provide a multi-version
 runtime window.
+
+## Migrating from 0.1.x to 0.2.0
+
+This candidate is not a published release. Pin the eventual release commit for
+all runtime crates and use the Bun compat-host from that same revision.
+
+- Use `ContextHandle::provide(key, value)` for initial registration only. A
+  provider already visible in the selected realm now returns
+  `CoreError::ServiceAlreadyProvided` without replacing the existing value.
+- Change intentional re-registration to `ContextHandle::replace(key, value)`.
+  Replacement requires an existing provider (`ServiceNotProvided` otherwise),
+  invalidates previous handles after commit, and transfers cleanup ownership to
+  the replacing scope. Reacquire handles after replacement; do not emulate an
+  upsert with a separate lookup followed by registration.
+- Account for the added `CoreError` variants in exhaustive matches, including
+  `ServiceChanged` when a staged update races with a host registration change.
+  Failed staged commits do not publish candidate-only registrations or overwrite
+  the concurrent provider.
+- A Native Loader consumer with a missing required provider remains managed in
+  `Pending`; successful loading is not proof that every plugin is active.
+  Observe readiness or the fiber snapshot before using its services. Actual
+  activation failures still roll back the transaction.
+- Upgrade Rust and Bun bridge components together and restart the supervisor.
+  Pending-request admission and session hydration now have bounded budgets;
+  callers must handle capacity and hydration errors. Node plugins remain trusted
+  process code, not a security sandbox.
+
+`cordis.plugin/v1`, `cordis.node/v1`, and `tessivum.conformance/v1` stay unchanged.
+Custom conformance inputs using `event/emit` must use `event/event-catalog` and
+its explicit case list; this fixture change does not rename production event APIs.
 
 ## WASM ABI policy
 

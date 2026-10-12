@@ -6,7 +6,13 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
-## Unreleased
+## 0.2.0 — Unreleased
+
+This is a source release candidate, not a published tag. The minor-version bump
+reflects the breaking service-registration and Native Loader readiness semantics;
+see [the migration guide](docs/COMPATIBILITY.md#migrating-from-01x-to-020).
+All four runtime crates advance together. `cordis.plugin/v1`, `cordis.node/v1`,
+and `tessivum.conformance/v1` remain unchanged.
 
 - Make `ContextHandle::provide` strict: duplicate visible keys return `ServiceAlreadyProvided`; add explicit `ContextHandle::replace` with generation-safe replacement and staged commit conflict detection.
 - Add service-catalog conformance coverage: every declared dependency, realm, interception, replacement, removal, duplicate, and stale-generation case now runs independently in both runners with strict invalid-case rejection.
@@ -14,6 +20,25 @@ independently of crate/repository releases.
 - Preserve managed Native Loader consumers in `Pending` when a required provider is absent; do not mistake a dependency wait for a failed activation transaction. Actual activation failures retain rollback behavior.
 - Add paired upstream Loader/Group/Include and Rust Loader catalog conformance: ten cases cover dependency ordering, duplicate IDs, ordered patches, config updates, replacement, candidate and rollback failures, nested groups, later patch targeting, and atomic persistence.
 - Execute every declared event catalog case in both conformance runners instead of allowing TS to ignore the case list. Migrate `event/emit` to `event/event-catalog` with 11 observed call/result traces and strict case validation; add an oracle regression for per-case execution and mismatch rejection. Production event APIs are unchanged.
+- Bound Bridge pending-request admission, cancel queued compat-host operations,
+  and limit session hydration by page count, event count, and bytes. Bound cached
+  agent snapshots with oldest-entry eviction. These controls do not make the
+  Legacy Node process a security sandbox.
+
+### Candidate verification
+
+- macOS ARM64: 125 workspace Rust tests; Oracle 5 tests / 151 assertions;
+  Oracle and compat-host TypeScript checks. The rebuilt Rust WASM guest passed
+  the Native/Extism/Legacy runtime smoke; the Native example completed provider
+  replacement and consumer reload with zero remaining resources.
+- Before this version-only cutover, Core `cbf9fabc375dab492eca703d93ebe52d164ad1bf`
+  passed the 30-sample macOS paired benchmark and the Alpha.29 product probe
+  (574 Rust tests, 22 filtered; actual CLI first-run and resume tool round trips).
+  These records identify that commit, not an eventual `0.2.0` tag. macOS PSS is
+  unavailable; the historical published Linux benchmark is unchanged.
+- This candidate has not been tagged, pushed, or published. Product dependencies
+  still pin Core `0.1.7`; Windows and Browser acceptance are not established by
+  the local checks above.
 
 ## 0.1.8 — 2026-09-24
 
