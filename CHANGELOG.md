@@ -6,6 +6,13 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
+## Unreleased
+
+- Retain Native Loader configuration expressions until declared JSON-valued service dependencies are ready; re-evaluate against current providers on replacement and restoration. Missing providers suspend the consumer, while evaluation, schema, or candidate-update failures preserve the committed instance and effects.
+- Add `LoaderRuntime::instantiate_configured` for source configuration import. Eager runtimes still resolve before construction; direct `NativePluginRuntime::instantiate` also accepts source expressions using the default scope. `NativePluginInstance::instantiate` remains the resolved-value primitive. Persisted entries keep their expressions, and arbitrary typed services are not implicitly serialized.
+- Preserve fresh factory dependency declarations during transactional updates, augmenting only the required dependencies used by retained service expressions.
+- Wait for queued dependency snapshots to settle before returning Native activation results; do not report a previous generation's success/failure during reconfiguration.
+
 ## 0.2.0 — 2026-10-13
 
 Repository source release; all runtime crates remain `publish = false`.

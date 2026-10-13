@@ -169,6 +169,12 @@ registers one `LoaderRuntime` for each runtime kind with `Loader::try_new`.
 A runtime turns a `ResolvedPackage`, `Entry`, and `ContextHandle` into a
 `RuntimeHandle`; the handle supplies `activate` and `dispose`.
 
+Loader calls `LoaderRuntime::instantiate_configured` with the source entry and
+its explicit `ConfigScope`. The default eagerly evaluates the entry and calls
+`instantiate`; managed Native overrides this boundary to retain expressions.
+Runtime decorators that wrap a managed runtime must forward configured import
+as well as construction to preserve that runtime's dependency-aware behavior.
+
 `Loader::{load,replace,update}` validates and imports a detached candidate,
 activates it, then disposes the currently committed tree. It changes its tree
 and context only after that process succeeds. Import, activation, and removal
@@ -203,9 +209,9 @@ configuration are validated before lifecycle effects. Failures are
 `NativePluginInstance::instantiate` creates a pending fiber after validation.
 `start()` waits for required descriptor dependencies, then runs in the fiber's
 child context. A failed start rolls back that child scope and calls `stop` once
-for partial plugin state. `update(config)` validates the candidate, stops the
-current instance, creates a fresh fiber, runs `update` and `start`, and commits
-the new configuration only after both hooks succeed. `dispose()` stops the
+for partial plugin state. `update(config)` validates and starts a fresh candidate
+in a staged context while preserving the current instance. Only successful
+candidate hooks and service commit replace the old instance. `dispose()` stops the
 plugin and disposes the fiber. `snapshot()` returns descriptor, committed
 configuration, fiber state, scope, and outstanding effects.
 
@@ -213,6 +219,31 @@ For Loader use, register a fresh factory for each package in
 `NativePluginRuntime` and pass it as `RuntimeKind::Native`. A duplicate or
 blank package registration fails. See `examples/native-minimal` for provider,
 consumer, typed event, replacement, reload, and root-disposal use.
+
+### Live Native configuration (unreleased)
+
+For `{ "$expr": "service.settings.label" }`, declare a descriptor dependency
+whose `ServiceKey.name` is `settings`, then publish a `serde_json::Value` under
+that exact key/version. Native reads it in the consumer's selected realm after
+readiness, validates the resulting configuration, and only then calls lifecycle
+hooks. A referenced optional dependency becomes required because its value is
+needed to evaluate the expression. Multiple declared versions with the same
+referenced name are rejected as ambiguous.
+
+Provider replacement and restoration re-evaluate the retained source; removal
+suspends the consumer and revokes its effects. Evaluation, schema, and update
+failures leave the prior committed instance/effects intact and are reported by
+runtime activation. The Loader's persisted tree keeps source expressions rather
+than their evaluated values. Static `ConfigScope.services` projections remain
+available when no same-name dependency is declared; a live dependency takes
+precedence and never falls back to a stale static projection.
+
+This is an explicit JSON projection contract, not arbitrary serialization of
+typed services or JavaScript execution. A provider of another Rust type fails
+closed. Direct `NativePluginRuntime::instantiate` also interprets reserved
+`$expr` nodes with `ConfigScope::default()` (including product composition calls);
+use configured import for explicit environment/profile/static projections.
+`NativePluginInstance::instantiate` still takes an already resolved value.
 
 ## WASM and Extism
 

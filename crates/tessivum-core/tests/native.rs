@@ -619,6 +619,262 @@ fn consumer_tree() -> EntryTree {
     }
 }
 
+struct ConfigConsumer {
+    changes: tokio::sync::mpsc::UnboundedSender<Value>,
+    replacing: bool,
+}
+
+impl NativePlugin for ConfigConsumer {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "config-consumer".into(),
+            version: "1".into(),
+            dependencies: vec![Dependency::Required(ServiceKey::new("settings", "1"))],
+            config_schema: provider_schema(),
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        context: ContextHandle,
+        config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async move {
+            let key = ServiceKey::new("configured", "1");
+            if self.replacing {
+                context.replace(key, config.clone())?;
+            } else {
+                context.provide(key, config.clone())?;
+            }
+            self.changes.send(config.clone()).unwrap();
+            Ok(())
+        })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        self.replacing = true;
+        Box::pin(async move {
+            if config["label"] == "reject" {
+                return Err(NativePluginError::Runtime {
+                    package: "config-consumer".into(),
+                    message: "rejected config".into(),
+                });
+            }
+            Ok(())
+        })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        self.replacing = false;
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn loader_evaluates_live_config_after_readiness_and_on_provider_changes() {
+    let root = ContextHandle::root();
+    let (changes, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let mut runtime = NativePluginRuntime::new();
+    runtime
+        .register("config-consumer", move || ConfigConsumer {
+            changes: changes.clone(),
+            replacing: false,
+        })
+        .unwrap();
+    let mut loader = Loader::try_new(
+        Arc::new(Resolver),
+        [Arc::new(runtime) as Arc<dyn LoaderRuntime>],
+    )
+    .unwrap()
+    .with_context(root.clone());
+    let tree = EntryTree {
+        entries: vec![entry(
+            "config",
+            "config-consumer",
+            json!({"label":{"$expr":"service.settings.label"}}),
+        )],
+        groups: vec![],
+    };
+    loader
+        .load(tree.clone())
+        .await
+        .expect("missing config provider leaves consumer pending");
+    assert!(observed.try_recv().is_err());
+    let provider = root.with_scope(root.scope().child().unwrap());
+    provider
+        .provide(ServiceKey::new("settings", "1"), json!({"label":"first"}))
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        json!({"label":"first"})
+    );
+    provider
+        .replace(ServiceKey::new("settings", "1"), json!({"label":"second"}))
+        .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        json!({"label":"second"})
+    );
+    provider.scope().dispose().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while root
+            .get::<Value>(&ServiceKey::new("configured", "1"))
+            .unwrap()
+            .is_some()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("provider removal revokes consumer effects");
+    root.provide(
+        ServiceKey::new("settings", "1"),
+        json!({"label":"restored"}),
+    )
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        json!({"label":"restored"})
+    );
+    assert_eq!(
+        loader.tree(),
+        &tree,
+        "evaluated config never replaces persisted expressions"
+    );
+    loader.unload().await.unwrap();
+    assert!(root
+        .get::<Value>(&ServiceKey::new("configured", "1"))
+        .unwrap()
+        .is_none());
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn live_config_failures_preserve_committed_effects_and_recover() {
+    let root = ContextHandle::root();
+    let key = ServiceKey::new("settings", "1");
+    root.provide(key.clone(), json!({"label":"first"})).unwrap();
+    let (changes, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let mut runtime = NativePluginRuntime::new();
+    runtime
+        .register("config-consumer", move || ConfigConsumer {
+            changes: changes.clone(),
+            replacing: false,
+        })
+        .unwrap();
+    let mut handle = runtime
+        .instantiate(
+            ResolvedPackage {
+                specifier: "config-consumer".into(),
+                location: "config-consumer".into(),
+            },
+            entry(
+                "config",
+                "config-consumer",
+                json!({"label":{"$expr":"service.settings.label"}}),
+            ),
+            root.clone(),
+        )
+        .await
+        .unwrap();
+    handle.activate().await.unwrap();
+    assert_eq!(observed.recv().await.unwrap(), json!({"label":"first"}));
+    // Missing projection, invalid schema, and rejected update are distinct failures.
+    for invalid in [json!({}), json!({"label":false}), json!({"label":"reject"})] {
+        let committed = root
+            .get::<Value>(&ServiceKey::new("configured", "1"))
+            .unwrap()
+            .unwrap();
+        let prior = committed.with(Clone::clone).unwrap();
+        root.replace(key.clone(), invalid).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), handle.activation())
+                .await
+                .expect("configuration failure is reported by the runtime")
+                .is_err()
+        );
+        assert_eq!(
+            committed.with(Clone::clone).unwrap(),
+            prior,
+            "failure keeps the prior provider generation live"
+        );
+        assert!(
+            observed.try_recv().is_err(),
+            "invalid candidate never enters start"
+        );
+        root.replace(key.clone(), json!({"label":"recovered"}))
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), observed.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            json!({"label":"recovered"})
+        );
+        tokio::time::timeout(Duration::from_secs(2), handle.activation())
+            .await
+            .expect("provider replacement settles")
+            .expect("valid provider replacement clears the failure");
+    }
+    handle.dispose().await.unwrap();
+    root.scope().dispose().await.unwrap();
+}
+
+#[tokio::test]
+async fn direct_update_honors_fresh_candidate_dependencies() {
+    let root = ContextHandle::root();
+    let log = Arc::new(Mutex::new(Log::default()));
+    let sequence = Arc::new(AtomicUsize::new(0));
+    let factory = Arc::new({
+        let log = Arc::clone(&log);
+        move || {
+            Box::new(Consumer {
+                log: Arc::clone(&log),
+                dependencies: if sequence.fetch_add(1, Ordering::SeqCst) == 0 {
+                    vec![]
+                } else {
+                    vec![Dependency::Required(provider_service())]
+                },
+                on_start: None,
+            }) as Box<dyn NativePlugin>
+        }
+    });
+    let mut instance =
+        NativePluginInstance::instantiate(factory, root.clone(), Value::Null).unwrap();
+    instance.start().await.unwrap();
+    {
+        let mut update = Box::pin(instance.update(Value::Null));
+        poll_fn(|context| match update.as_mut().poll(context) {
+            Poll::Pending => Poll::Ready(()),
+            Poll::Ready(result) => panic!("fresh required dependency was bypassed: {result:?}"),
+        })
+        .await;
+        assert_eq!(log.lock().unwrap().starts, ["consumer:optional"]);
+        root.provide(provider_service(), ProviderService("new"))
+            .unwrap();
+        update.await.unwrap();
+    }
+    assert_eq!(
+        log.lock().unwrap().starts,
+        ["consumer:optional", "consumer:new"]
+    );
+    instance.dispose().await.unwrap();
+    root.scope().dispose().await.unwrap();
+}
+
 #[tokio::test]
 async fn native_instance_waits_for_a_required_provider_before_starting() {
     let log = Arc::new(Mutex::new(Log::default()));

@@ -12,9 +12,10 @@ use std::{
 use serde_json::Value;
 
 use crate::{
-    ActivationState, CancellationToken, ContextHandle, CoreError, Dependency, DependencySnapshot,
-    EffectMeta, Entry, Fiber, FiberId, FiberState, Generation, LoaderError, LoaderFuture,
-    LoaderRuntime, ResolvedPackage, RuntimeHandle, RuntimeKind, Scope, ScopeId,
+    evaluate_config, ActivationState, CancellationToken, ConfigExpression, ConfigScope,
+    ContextHandle, CoreError, Dependency, DependencySnapshot, EffectMeta, Entry, Fiber, FiberId,
+    FiberState, Generation, LoaderError, LoaderFuture, LoaderRuntime, ResolvedPackage,
+    RuntimeHandle, RuntimeKind, Scope, ScopeId, ServiceKey,
 };
 
 /// A boxed asynchronous native-plugin operation.
@@ -515,6 +516,102 @@ impl DependencyGate {
     }
 }
 
+/// Only JSON-valued, declared dependencies are exposed to service expressions.
+/// Typed host services remain opaque; configuration never serializes them implicitly.
+struct NativeConfiguration {
+    config: Value,
+    intercept: Value,
+    scope: ConfigScope,
+    services: Vec<ServiceKey>,
+}
+
+impl NativeConfiguration {
+    fn new(
+        entry: Entry,
+        scope: ConfigScope,
+        descriptor: &mut NativePluginDescriptor,
+    ) -> Result<Self, LoaderError> {
+        let mut names = BTreeSet::new();
+        config_service_names(&entry.options.config, &mut names)?;
+        config_service_names(&entry.options.intercept, &mut names)?;
+        let mut services = Vec::new();
+        for name in names {
+            let matching = descriptor
+                .dependencies
+                .iter()
+                .filter(|dep| dep.key().name == name)
+                .count();
+            if matching > 1 || (matching == 0 && !scope.services.contains_key(&name)) {
+                return Err(LoaderError::Expression(format!("service projection {name:?} requires one declared dependency or a static projection")));
+            }
+            if let Some(dependency) = descriptor
+                .dependencies
+                .iter_mut()
+                .find(|dep| dep.key().name == name)
+            {
+                let key = dependency.key().clone();
+                *dependency = Dependency::Required(key.clone());
+                services.push(key);
+            }
+        }
+        Ok(Self {
+            config: entry.options.config,
+            intercept: entry.options.intercept,
+            scope,
+            services,
+        })
+    }
+
+    fn evaluate(&self, context: &ContextHandle) -> NativePluginResult<Value> {
+        let mut scope = self.scope.clone();
+        for key in &self.services {
+            let value = context
+                .get::<Value>(key)?
+                .ok_or_else(|| configuration_error(format!("service {key} is unavailable")))?;
+            scope
+                .services
+                .insert(key.name.clone(), value.with(Clone::clone)?);
+        }
+        let config = evaluate_config(&self.config, &scope).map_err(configuration_error)?;
+        evaluate_config(&self.intercept, &scope).map_err(configuration_error)?;
+        Ok(config)
+    }
+}
+
+fn configuration_error(error: impl fmt::Display) -> NativePluginError {
+    NativePluginError::Runtime {
+        package: "native configuration".into(),
+        message: error.to_string(),
+    }
+}
+
+fn config_service_names(value: &Value, names: &mut BTreeSet<String>) -> Result<(), LoaderError> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                config_service_names(value, names)?;
+            }
+        }
+        Value::Object(values) => {
+            if let Some(expression) = values.get("$expr") {
+                let expression = expression
+                    .as_str()
+                    .ok_or_else(|| LoaderError::Expression("$expr must be a string".into()))?;
+                if let ConfigExpression::Service { name, .. } = ConfigExpression::parse(expression)?
+                {
+                    names.insert(name);
+                }
+            } else {
+                for value in values.values() {
+                    config_service_names(value, names)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// One plugin and the fiber which owns every lifecycle-created resource.
 pub struct NativePluginInstance {
     plugin: Box<dyn NativePlugin>,
@@ -522,6 +619,7 @@ pub struct NativePluginInstance {
     descriptor: NativePluginDescriptor,
     context: ContextHandle,
     config: Value,
+    configuration: Option<Arc<NativeConfiguration>>,
     fiber: Fiber,
     dependency_gate: Option<DependencyGate>,
     start_attempted: bool,
@@ -563,6 +661,7 @@ impl NativePluginInstance {
             descriptor,
             context,
             config,
+            configuration: None,
             fiber,
             start_attempted: false,
             dependency_gate: None,
@@ -605,12 +704,15 @@ impl NativePluginInstance {
     /// A failed plugin start is rolled back by Fiber before this future resolves,
     /// then `stop` is called once for partial plugin state.
     pub async fn start(&mut self) -> NativePluginResult<()> {
-        self.descriptor.validate_config(&self.config)?;
         if self.fiber.state() != FiberState::Pending {
             return Err(invalid_state("start native plugin", self.fiber.state()));
         }
         let cancellation = self.cancellation();
         self.wait_for_dependencies(cancellation).await?;
+        if let Some(configuration) = &self.configuration {
+            self.config = configuration.evaluate(&self.context)?;
+        }
+        self.descriptor.validate_config(&self.config)?;
         self.start_attempted = true;
 
         let base = self.context.clone();
@@ -636,6 +738,13 @@ impl NativePluginInstance {
         }
     }
 
+    fn resolved_config(&self) -> NativePluginResult<Value> {
+        match &self.configuration {
+            Some(configuration) => configuration.evaluate(&self.context),
+            None => Ok(self.config.clone()),
+        }
+    }
+
     /// Stages a fresh plugin and Fiber, preserving the active instance until
     /// the candidate's update and start hooks have both succeeded.
     pub async fn update(&mut self, config: Value) -> NativePluginResult<()> {
@@ -652,6 +761,23 @@ impl NativePluginInstance {
             })?;
         let cancellation = self.cancellation();
         let mut candidate = Self::instantiate(factory, self.context.staged(), config)?;
+        candidate.configuration = self.configuration.clone();
+        if let Some(configuration) = &candidate.configuration {
+            for key in &configuration.services {
+                match candidate
+                    .descriptor
+                    .dependencies
+                    .iter_mut()
+                    .find(|dependency| dependency.key() == key)
+                {
+                    Some(dependency) => *dependency = Dependency::Required(key.clone()),
+                    None => candidate
+                        .descriptor
+                        .dependencies
+                        .push(Dependency::Required(key.clone())),
+                }
+            }
+        }
 
         if let Err(error) = candidate.start_after_update(cancellation).await {
             return match candidate.dispose().await {
@@ -675,6 +801,11 @@ impl NativePluginInstance {
         cancellation: CancellationToken,
     ) -> NativePluginResult<()> {
         self.wait_for_dependencies(cancellation).await?;
+        if let Some(configuration) = &self.configuration {
+            let config = configuration.evaluate(&self.context)?;
+            self.descriptor.validate_config(&config)?;
+            self.config = config;
+        }
         self.start_attempted = true;
         let base = self.context.clone();
         let config = &self.config;
@@ -925,19 +1056,57 @@ impl LoaderRuntime for NativePluginRuntime {
         entry: Entry,
         context: ContextHandle,
     ) -> LoaderFuture<'a, Box<dyn RuntimeHandle>> {
+        self.instantiate_configured(package, entry, context, ConfigScope::default())
+    }
+
+    fn instantiate_configured<'a>(
+        &'a self,
+        package: ResolvedPackage,
+        entry: Entry,
+        context: ContextHandle,
+        config_scope: ConfigScope,
+    ) -> LoaderFuture<'a, Box<dyn RuntimeHandle>> {
         Box::pin(async move {
+            entry.validate()?;
             let factory = self.factories.get(&package.specifier).ok_or_else(|| {
                 LoaderError::Validation(format!(
                     "no native plugin factory is registered for {}",
                     package.specifier
                 ))
             })?;
-            let instance = NativePluginInstance::instantiate(
-                Arc::clone(factory),
-                context,
-                entry.options.config,
-            )
-            .map_err(|error| LoaderError::Validation(error.to_string()))?;
+            let plugin = factory();
+            let mut descriptor = plugin.descriptor();
+            descriptor
+                .validate()
+                .map_err(|error| LoaderError::Validation(error.to_string()))?;
+            let configuration = NativeConfiguration::new(entry, config_scope, &mut descriptor)?;
+            let instance = if configuration.services.is_empty() {
+                let config = configuration
+                    .evaluate(&context)
+                    .map_err(|error| LoaderError::Validation(error.to_string()))?;
+                NativePluginInstance::instantiate_inner(
+                    plugin,
+                    Some(Arc::clone(factory)),
+                    context,
+                    config,
+                )
+                .map_err(|error| LoaderError::Validation(error.to_string()))?
+            } else {
+                let fiber = Fiber::new(&context.scope(), descriptor.name.clone())
+                    .map_err(|error| LoaderError::Validation(error.to_string()))?;
+                NativePluginInstance {
+                    plugin,
+                    factory: Some(Arc::clone(factory)),
+                    descriptor,
+                    context,
+                    config: Value::Null,
+                    configuration: Some(Arc::new(configuration)),
+                    fiber,
+                    dependency_gate: None,
+                    start_attempted: false,
+                    stopped: false,
+                }
+            };
             let handle = NativeRuntimeHandle::new(
                 instance,
                 Arc::clone(&self.runtime_builder),
@@ -1086,6 +1255,9 @@ impl ManagedControl {
         let stopping = state.stopping;
         let snapshot = state.snapshot.clone();
         state.dirty = false;
+        if !stopping {
+            state.phase = ManagedPhase::Starting;
+        }
         (stopping, snapshot)
     }
 
@@ -1097,18 +1269,27 @@ impl ManagedControl {
                 .state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
+            if state.stopping {
+                return Poll::Ready(Err(LoaderError::Validation(
+                    "native runtime has stopped".into(),
+                )));
+            }
             match state.phase {
-                ManagedPhase::Active if state.snapshot.ready => {
+                ManagedPhase::Active if !state.dirty && state.snapshot.ready => {
                     Poll::Ready(Ok(ActivationState::Active))
                 }
-                ManagedPhase::Failed => Poll::Ready(Err(LoaderError::Validation(
-                    state
-                        .error
-                        .as_ref()
-                        .expect("failed native runtime stores its error")
-                        .to_string(),
-                ))),
-                ManagedPhase::Pending if state.initialized && !state.snapshot.ready => {
+                ManagedPhase::Failed if !state.dirty || !state.initialized => {
+                    Poll::Ready(Err(LoaderError::Validation(
+                        state
+                            .error
+                            .as_ref()
+                            .expect("failed native runtime stores its error")
+                            .to_string(),
+                    )))
+                }
+                ManagedPhase::Pending
+                    if !state.dirty && state.initialized && !state.snapshot.ready =>
+                {
                     Poll::Ready(Ok(ActivationState::Pending))
                 }
                 _ => {
@@ -1264,7 +1445,11 @@ fn run_managed_native(
             }
             FiberState::Active if active_generations.as_ref() != Some(&generations) => {
                 control.set_phase(ManagedPhase::Starting, None);
-                match native_block_on(&runtime, instance.update(instance.config().clone())) {
+                let result = match instance.resolved_config() {
+                    Ok(config) => native_block_on(&runtime, instance.update(config)),
+                    Err(error) => Err(error),
+                };
+                match result {
                     Ok(()) => {
                         active_generations = Some(generations);
                         control.set_cancellation(instance.cancellation());

@@ -151,6 +151,15 @@ impl Entry {
         }
         self.options.validate()
     }
+
+    /// Resolves static configuration for runtimes without managed dependencies.
+    pub fn evaluate_config(&mut self, scope: &ConfigScope) -> LoaderResult<()> {
+        let config = evaluate_config(&self.options.config, scope)?;
+        let intercept = evaluate_config(&self.options.intercept, scope)?;
+        self.options.config = config;
+        self.options.intercept = intercept;
+        Ok(())
+    }
 }
 
 /// A nested, ordered group of entries. A disabled group suppresses every
@@ -449,6 +458,21 @@ pub trait LoaderRuntime: Send + Sync {
         entry: Entry,
         context: ContextHandle,
     ) -> LoaderFuture<'a, Box<dyn RuntimeHandle>>;
+
+    /// Imports source configuration. Managed runtimes retain it until dependencies
+    /// are ready; eager runtimes resolve it before constructing their handle.
+    fn instantiate_configured<'a>(
+        &'a self,
+        package: ResolvedPackage,
+        mut entry: Entry,
+        context: ContextHandle,
+        config_scope: ConfigScope,
+    ) -> LoaderFuture<'a, Box<dyn RuntimeHandle>> {
+        Box::pin(async move {
+            entry.evaluate_config(&config_scope)?;
+            self.instantiate(package, entry, context).await
+        })
+    }
 }
 
 /// Optional source-change bridge. It is kept at the loader boundary so runtime
@@ -704,13 +728,9 @@ async fn import_entry(
     resolver: &dyn PackageResolver,
     runtimes: &BTreeMap<RuntimeKind, Arc<dyn LoaderRuntime>>,
     scope: &ConfigScope,
-    mut entry: Entry,
+    entry: Entry,
     context: ContextHandle,
 ) -> LoaderResult<LiveEntry> {
-    entry.options.config = evaluate_config(&entry.options.config, scope)
-        .map_err(|error| error.in_entry("import", &entry))?;
-    entry.options.intercept = evaluate_config(&entry.options.intercept, scope)
-        .map_err(|error| error.in_entry("import", &entry))?;
     let package = resolver
         .resolve(&entry.package, entry.options.runtime)
         .await
@@ -724,7 +744,7 @@ async fn import_entry(
             message: format!("no {:?} runtime is registered", entry.options.runtime),
         })?;
     let handle = runtime
-        .instantiate(package, entry.clone(), context)
+        .instantiate_configured(package, entry.clone(), context, scope.clone())
         .await
         .map_err(|error| error.in_entry("import", &entry))?;
     Ok(LiveEntry { entry, handle })
