@@ -7,7 +7,7 @@ contract:
 
 | Coordinate | Current value | Rule |
 | --- | --- | --- |
-| Repository source candidate / Rust runtime crates | `0.2.0` (unreleased) | All workspace runtime crates are MIT-licensed and versioned together with `publish = false`; publication is a repository source release, not a crates.io registry publication. |
+| Repository source release / Rust runtime crates | `0.2.0` | All workspace runtime crates are MIT-licensed and versioned together with `publish = false`; publication is a repository source release, not a crates.io registry publication. |
 | Conformance fixture schema | `tessivum.conformance/v1` | Fixture documents must use the exact schema version. |
 | WASM ABI | `cordis.plugin/v1` | The Extism host accepts this exact string only. |
 | Node bridge | `cordis.node/v1` | Rust and Bun endpoints require this exact string before requests. |
@@ -20,7 +20,7 @@ bridge upgrade.
 
 ## Release-version policy
 
-`0.1.x` was the first public release line. The unreleased `0.2.0` candidate
+`0.1.x` was the first public release line. The `0.2.0` source release
 remains pre-1.0 and introduces the explicit service-replacement contract below.
 
 - A patch release (`0.1.x` → `0.1.x+1`) preserves the documented Rust public
@@ -43,8 +43,8 @@ runtime window.
 
 ## Migrating from 0.1.x to 0.2.0
 
-This candidate is not a published release. Pin the eventual release commit for
-all runtime crates and use the Bun compat-host from that same revision.
+Pin the `v0.2.0` release commit for all runtime crates and use the Bun
+compat-host from that same revision.
 
 - Use `ContextHandle::provide(key, value)` for initial registration only. A
   provider already visible in the selected realm now returns

@@ -3,12 +3,22 @@
 **Report schema:** `tessivum.differential-report/v1`  
 **Recorded:** 2026-08-17T10:19:40Z  
 **ABI:** `cordis.plugin/v1` · **bridge:** `cordis.node/v1`  
-**Repository source release:** `0.1.4` · all runtime crates remain `publish = false`; this is not a crates.io package release.
+**Repository source release:** `0.2.0` · all runtime crates remain `publish = false`; this is not a crates.io package release.
 
 The original differential evidence below was recorded for the `0.1.0` release on 2026-08-17. Its hashes and counts are historical snapshots, not hashes of today's fixtures. Later releases through `0.1.4` retained that recorded baseline; the C1 event and Loader catalog cutovers below extend the same `tessivum.conformance/v1` contract without changing production event or Loader APIs.
 
 
 The machine-readable evidence is [`../fixtures/conformance/differential-report.json`](../fixtures/conformance/differential-report.json).
+
+## 0.2.0 release check — 2026-10-13
+
+All six current fixtures (`lifecycle`, `services`, `service-registration`,
+`events`, `loader-dependencies`, and `loader`) passed the actual Rust conformance
+binary and Bun oracle with identical traces on macOS ARM64. The release asset
+`conformance-0.2.0.json` records each fixture hash and both complete outputs.
+Runtime source matches candidate `e8283fb7767e4abb7d1c92afa86e7578f6f4e77b`;
+the release finalization changes documentation only. The original differential
+report linked above remains historical evidence, not the current fixture hashes.
 
 ## C1 event catalog evidence — 2026-10-10
 

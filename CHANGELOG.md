@@ -6,10 +6,10 @@ The repository follows the pre-1.0 compatibility policy in
 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md). Wire identifiers are versioned
 independently of crate/repository releases.
 
-## 0.2.0 — Unreleased
+## 0.2.0 — 2026-10-13
 
-This is a source release candidate, not a published tag. The minor-version bump
-reflects the breaking service-registration and Native Loader readiness semantics;
+Repository source release; all runtime crates remain `publish = false`.
+The minor-version bump reflects breaking service-registration and Native Loader readiness semantics;
 see [the migration guide](docs/COMPATIBILITY.md#migrating-from-01x-to-020).
 All four runtime crates advance together. `cordis.plugin/v1`, `cordis.node/v1`,
 and `tessivum.conformance/v1` remain unchanged.
@@ -25,7 +25,7 @@ and `tessivum.conformance/v1` remain unchanged.
   agent snapshots with oldest-entry eviction. These controls do not make the
   Legacy Node process a security sandbox.
 
-### Candidate verification
+### Release verification
 
 - macOS ARM64: 125 workspace Rust tests; Oracle 5 tests / 151 assertions;
   Oracle and compat-host TypeScript checks. The rebuilt Rust WASM guest passed
@@ -36,9 +36,18 @@ and `tessivum.conformance/v1` remain unchanged.
   (574 Rust tests, 22 filtered; actual CLI first-run and resume tool round trips).
   These records identify that commit, not an eventual `0.2.0` tag. macOS PSS is
   unavailable; the historical published Linux benchmark is unchanged.
-- This candidate has not been tagged, pushed, or published. Product dependencies
-  still pin Core `0.1.7`; Windows and Browser acceptance are not established by
-  the local checks above.
+- Candidate `e8283fb7767e4abb7d1c92afa86e7578f6f4e77b` passed the
+  [Windows Core CI](https://github.com/wavetao2010/tessivum-core/actions/runs/38229775907),
+  including Clippy, Rust tests, and Native/Extism/Legacy runtime execution.
+- The same candidate, pinned by Git revision and exact `0.2.0` crate versions,
+  passed the Alpha.29 product probe on macOS ARM64: 574 tests, 22 filtered,
+  and actual CLI first-run/resume tool round trips with preserved history.
+- All six conformance fixtures passed both real Rust and Bun runners on
+  2026-10-13 with identical traces. Release assets retain raw conformance output
+  and product integration evidence. Changes after the candidate are documentation only.
+- Product dependencies still pin Core `0.1.7`; Core Windows CI does not establish
+  product Windows or Browser acceptance. Historical Linux benchmark data is
+  retained, not presented as a fresh `0.2.0` performance measurement.
 
 ## 0.1.8 — 2026-09-24
 

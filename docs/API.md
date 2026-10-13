@@ -1,7 +1,7 @@
 # Public API
 
 This document describes the Rust APIs exported by the four crates in this
-workspace for the unreleased `0.2.0` source candidate. The public boundary is intentionally small:
+workspace for the `0.2.0` source release. The public boundary is intentionally small:
 Core owns lifecycle, services, events, and the transactional Loader; Native,
 WASM, and legacy Node are Loader runtimes. Product-domain APIs do not belong
 here.
