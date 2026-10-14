@@ -9,9 +9,9 @@ use std::{
 
 use serde_json::json;
 use tessivum_core::{
-    ContextHandle, Entry, EntryGroup, EntryId, EntryOptions, EntryTree, HmrDriver, Loader,
-    LoaderError, LoaderFuture, LoaderRuntime, PackageResolver, Patch, ResolvedPackage,
-    RuntimeHandle, RuntimeKind, ServiceKey, TraceEventKind,
+    ContextHandle, Entry, EntryGroup, EntryId, EntryOptions, EntryTree, Loader, LoaderError,
+    LoaderFuture, LoaderRuntime, PackageResolver, Patch, ResolvedPackage, RuntimeHandle,
+    RuntimeKind, ServiceKey, TraceEventKind,
 };
 
 static NEXT_PATH: AtomicU64 = AtomicU64::new(1);
@@ -343,21 +343,6 @@ impl RuntimeHandle for MockHandle {
             } else {
                 Ok(())
             }
-        })
-    }
-}
-
-struct MockHmr {
-    state: Arc<MockState>,
-}
-
-impl HmrDriver for MockHmr {
-    fn invalidate<'a>(&'a self, package: &'a ResolvedPackage) -> LoaderFuture<'a, ()> {
-        let state = Arc::clone(&self.state);
-        let specifier = package.specifier.clone();
-        Box::pin(async move {
-            state.record(format!("hmr:{specifier}"));
-            Ok(())
         })
     }
 }
@@ -750,29 +735,5 @@ async fn detached_candidates_inherit_host_service_realm_and_intercepts() {
         loader.context().intercept_config(&service),
         json!({"origin": "host"}),
         "the detached candidate keeps host intercept configuration"
-    );
-}
-
-#[tokio::test]
-async fn resolver_and_hmr_are_public_runtime_boundaries() {
-    let state = Arc::new(MockState::default());
-    let resolver = MockResolver {
-        state: Arc::clone(&state),
-    };
-    let package = resolver
-        .resolve("test/hot", RuntimeKind::Native)
-        .await
-        .expect("resolver produces a runtime-specific imported package");
-    assert_eq!(package.location, "resolved:test/hot");
-    MockHmr {
-        state: Arc::clone(&state),
-    }
-    .invalidate(&package)
-    .await
-    .expect("HMR driver is invoked only through its package boundary");
-    assert_eq!(
-        state.calls(),
-        vec!["resolve:test/hot", "hmr:test/hot"],
-        "the loader-facing interfaces pass resolved packages rather than runtime internals"
     );
 }

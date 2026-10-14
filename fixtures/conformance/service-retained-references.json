@@ -1,0 +1,12 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "service.retained-references",
+  "domain": "service",
+  "scenario": "service-catalog",
+  "input": {"cases": [{"id": "provider-replacement"}, {"id": "provider-removal-recovery"}, {"id": "stale-generation"}]},
+  "expectedTrace": [
+    {"event": "service-provided", "subject": "provider-replacement", "phase": "catalog", "value": {"consumer": {"starts": 2, "stops": 1}, "oldOperation": {"stale": true, "value": null}, "visible": "dark"}},
+    {"event": "service-provided", "subject": "provider-removal-recovery", "phase": "catalog", "value": {"consumer": {"starts": 2, "stops": 1}, "missingAfterRemoval": true, "oldAfterRemoval": {"stale": true, "value": null}, "oldAfterRecovery": {"stale": true, "value": null}, "visible": "new"}},
+    {"event": "service-provided", "subject": "stale-generation", "phase": "catalog", "value": {"oldOperation": {"stale": true, "value": null}, "visible": "dark"}}
+  ]
+}

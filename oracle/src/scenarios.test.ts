@@ -48,6 +48,21 @@ test('service catalog executes each declared case and rejects malformed cases', 
   }
 })
 
+test('revoked reference differences remain explicit and preserve consumer lifecycle', async () => {
+  const fixture = await Bun.file(new URL('../../fixtures/conformance/service-retained-references.json', import.meta.url)).json() as Fixture
+  const values = [
+    { consumer: { starts: 2, stops: 1 }, oldOperation: { stale: false, value: 'light' }, visible: 'dark' },
+    { consumer: { starts: 2, stops: 1 }, missingAfterRemoval: true, oldAfterRemoval: { stale: false, value: 'old' }, oldAfterRecovery: { stale: false, value: 'old' }, visible: 'new' },
+    { oldOperation: { stale: false, value: 'light' }, visible: 'dark' },
+  ]
+  for (const [index, item] of (fixture.input!.cases as { id: string }[]).entries()) {
+    const single: Fixture = { ...fixture, input: { cases: [item] }, expectedTrace: [fixture.expectedTrace[index]!] }
+    const actual = await execute(single)
+    expect(actual.status).toBe('MISMATCH')
+    expect(actual.trace).toEqual([{ ...fixture.expectedTrace[index]!, value: values[index] }])
+  }
+})
+
 test('service registration executes the three strict cases', async () => {
   const fixture = await Bun.file(new URL('../../fixtures/conformance/service-registration.json', import.meta.url)).json() as Fixture
   const actual = await execute(fixture)

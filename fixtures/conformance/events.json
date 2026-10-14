@@ -6,6 +6,7 @@
   "input": {
     "cases": [
       {"id": "emit-ordering"},
+      {"id": "emit-error-propagation"},
       {"id": "parallel-aggregate"},
       {"id": "serial-bail"},
       {"id": "sync-bail"},
@@ -20,6 +21,7 @@
   },
   "expectedTrace": [
     {"event": "event-dispatched", "subject": "emit-ordering", "phase": "emit", "value": {"calls": ["first", "second"]}},
+    {"event": "event-dispatched", "subject": "emit-error-propagation", "phase": "emit", "value": {"calls": ["first"], "error": "listener exploded"}},
     {"event": "event-dispatched", "subject": "parallel-aggregate", "phase": "parallel", "value": {"calls": ["first", "second", "third"], "errors": 2}},
     {"event": "event-dispatched", "subject": "serial-bail", "phase": "serial", "value": {"calls": ["null", "false", "stop"], "result": "stop"}},
     {"event": "event-dispatched", "subject": "sync-bail", "phase": "bail", "value": {"calls": ["null", "false", "stop"], "result": "stop"}},

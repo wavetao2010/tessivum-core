@@ -5,26 +5,20 @@
   "scenario": "service-catalog",
   "input": {
     "cases": [
-      {"id": "late-provider", "required": "clock"},
-      {"id": "provider-replacement", "service": "theme"},
-      {"id": "provider-removal-recovery", "service": "cache"},
-      {"id": "optional-dependency", "optional": "metrics"},
-      {"id": "duplicate-provider", "service": "logger"},
-      {"id": "isolate-realms", "service": "storage", "realms": ["alpha", "beta"]},
-      {"id": "shared-realm", "service": "bus", "realm": "shared"},
-      {"id": "intercept-merge", "service": "config"},
-      {"id": "stale-generation", "service": "session"}
+      {"id": "late-provider"},
+      {"id": "optional-dependency"},
+      {"id": "duplicate-provider"},
+      {"id": "isolate-realms"},
+      {"id": "shared-realm"},
+      {"id": "intercept-merge"}
     ]
   },
   "expectedTrace": [
-    {"event": "service-provided", "subject": "late-provider", "phase": "catalog", "value": {"readyBefore": false, "readyAfter": true, "visible": "wall"}},
-    {"event": "service-provided", "subject": "provider-replacement", "phase": "catalog", "value": {"oldStale": true, "visible": "dark"}},
-    {"event": "service-provided", "subject": "provider-removal-recovery", "phase": "catalog", "value": {"missingAfterRemoval": true, "oldStale": true, "visible": "new"}},
-    {"event": "service-provided", "subject": "optional-dependency", "phase": "catalog", "value": {"ready": true, "visible": null}},
+    {"event": "service-provided", "subject": "late-provider", "phase": "catalog", "value": {"consumer": {"starts": 1, "stops": 1}, "readyBefore": false, "readyAfter": true, "readyAfterRemoval": false, "visible": "wall"}},
+    {"event": "service-provided", "subject": "optional-dependency", "phase": "catalog", "value": {"ready": true, "starts": 1, "visible": null}},
     {"event": "service-provided", "subject": "duplicate-provider", "phase": "catalog", "value": {"duplicateRejected": true, "visible": "first"}},
     {"event": "service-provided", "subject": "isolate-realms", "phase": "catalog", "value": {"alpha": "alpha", "betaMissing": true}},
     {"event": "service-provided", "subject": "shared-realm", "phase": "catalog", "value": {"visible": "shared"}},
-    {"event": "service-provided", "subject": "intercept-merge", "phase": "catalog", "value": {"config": {"retry": {"backoff": "fast"}, "source": "child"}}},
-    {"event": "service-provided", "subject": "stale-generation", "phase": "catalog", "value": {"oldStale": true, "visible": "dark"}}
+    {"event": "service-provided", "subject": "intercept-merge", "phase": "catalog", "value": {"config": {"retry": {"backoff": "fast"}, "source": "child"}}}
   ]
 }

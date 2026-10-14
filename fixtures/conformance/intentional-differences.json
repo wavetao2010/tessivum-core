@@ -16,6 +16,18 @@
   },
   "differences": [
     {
+      "id": "revoked-service-handles-reject-access",
+      "status": "accepted",
+      "approvedOn": "2026-10-14",
+      "kind": "service-lifetime-safety",
+      "sourceRevision": "47f943859bef60e4160492346772ded9b24f765a",
+      "sourceBehavior": "Retained JavaScript service references remain callable and return old values after provider removal or replacement.",
+      "tessivumBehavior": "Operations through old generation handles fail with StaleServiceHandle after provider removal or replacement; fresh lookups observe the current provider.",
+      "rationale": "User explicitly approved retaining Rust generation safety rather than allowing revoked handles to access obsolete services.",
+      "fixture": "service-retained-references.json",
+      "conformanceImpact": "Rust PASS and upstream TRACE_MISMATCH remain visible for old-reference operations only; consumer readiness, cleanup, and fresh service values must still agree."
+    },
+    {
       "id": "pending-config-uses-latest-source",
       "status": "accepted",
       "approvedOn": "2026-10-14",

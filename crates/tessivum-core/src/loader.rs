@@ -2,14 +2,16 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
     future::{poll_fn, Future},
-    io::Write,
-    path::Path,
+    io::{Read, Write},
+    path::{Path, PathBuf},
     pin::Pin,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        mpsc, Arc, Mutex,
     },
     task::Poll,
+    thread::{self, JoinHandle},
+    time::Duration,
 };
 
 use serde::{Deserialize, Serialize};
@@ -481,6 +483,191 @@ pub trait HmrDriver: Send + Sync {
     fn invalidate<'a>(&'a self, package: &'a ResolvedPackage) -> LoaderFuture<'a, ()>;
 }
 
+/// Configuration for [`EntryTreeWatcher`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EntryTreeWatcherOptions {
+    /// Interval between source reads while idle. After an in-flight transaction
+    /// settles, the newest source is read within one additional interval.
+    pub poll_interval: Duration,
+    /// Maximum source size in bytes; larger files are rejected without reload.
+    pub max_source_bytes: usize,
+}
+
+impl Default for EntryTreeWatcherOptions {
+    fn default() -> Self {
+        Self {
+            poll_interval: Duration::from_millis(100),
+            max_source_bytes: 4 * 1024 * 1024,
+        }
+    }
+}
+
+/// Consumer-visible state of an [`EntryTreeWatcher`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntryTreeWatcherSnapshot {
+    pub tree: EntryTree,
+    pub committed_updates: u64,
+    pub rejected_updates: u64,
+    pub last_error: Option<LoaderError>,
+    pub running: bool,
+}
+
+struct EntryTreeWatcherState {
+    snapshot: EntryTreeWatcherSnapshot,
+    context: ContextHandle,
+}
+
+struct EntryTreeWatcherControl {
+    state: Mutex<EntryTreeWatcherState>,
+    stop: tokio::sync::Notify,
+    stopping: std::sync::atomic::AtomicBool,
+}
+
+/// Owns a [`Loader`] and keeps it synchronized with one JSON or YAML entry-tree
+/// file. Updates are serialized through `Loader::replace`; rejected candidates
+/// leave the last committed tree live. Missing/unreadable files are errors, not
+/// requests to unload; write an empty entry tree to explicitly remove plugins.
+///
+/// The watcher uses bounded polling rather than a platform-specific filesystem
+/// dependency. [`Self::stop`] wakes and joins its sole worker, waits for an
+/// in-flight transaction, and unloads the committed tree. Dropping the watcher
+/// performs the same join so it cannot detach an orphan worker.
+/// Start/stop/Drop are blocking joins; async callers should use `spawn_blocking`
+/// when plugin work needs their caller runtime to make progress.
+pub struct EntryTreeWatcher {
+    path: PathBuf,
+    control: Arc<EntryTreeWatcherControl>,
+    worker: Option<JoinHandle<LoaderResult<()>>>,
+    stop_result: Option<LoaderResult<()>>,
+}
+
+impl std::fmt::Debug for EntryTreeWatcher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("EntryTreeWatcher")
+            .field("path", &self.path)
+            .field("snapshot", &self.snapshot())
+            .finish()
+    }
+}
+
+impl EntryTreeWatcher {
+    /// Starts watching `path` and waits until its current contents have been
+    /// applied or rejected. A rejected initial candidate is exposed in
+    /// [`Self::snapshot`] and remains eligible for later recovery.
+    pub fn start(
+        loader: Loader,
+        path: impl Into<PathBuf>,
+        options: EntryTreeWatcherOptions,
+    ) -> LoaderResult<Self> {
+        if options.poll_interval.is_zero()
+            || options.max_source_bytes == 0
+            || options.max_source_bytes.checked_add(1).is_none()
+        {
+            return Err(LoaderError::Validation(
+                "watch interval and source byte limit must be positive and bounded".into(),
+            ));
+        }
+        let control = Arc::new(EntryTreeWatcherControl {
+            state: Mutex::new(EntryTreeWatcherState {
+                snapshot: EntryTreeWatcherSnapshot {
+                    tree: loader.tree().clone(),
+                    committed_updates: 0,
+                    rejected_updates: 0,
+                    last_error: None,
+                    running: true,
+                },
+                context: loader.context(),
+            }),
+            stop: tokio::sync::Notify::new(),
+            stopping: std::sync::atomic::AtomicBool::new(false),
+        });
+        let worker_control = Arc::clone(&control);
+        let path = path.into();
+        let worker_path = path.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(0);
+        let worker = thread::Builder::new()
+            .name("tessivum-entry-tree-watcher".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        LoaderError::Validation(format!(
+                            "failed to create entry-tree watcher runtime: {error}"
+                        ))
+                    })?;
+                runtime.block_on(run_entry_tree_watcher(
+                    loader,
+                    worker_path,
+                    options,
+                    worker_control,
+                    ready_tx,
+                ))
+            })
+            .map_err(|error| {
+                LoaderError::Validation(format!("failed to start entry-tree watcher: {error}"))
+            })?;
+        let mut watcher = Self {
+            path,
+            control,
+            worker: Some(worker),
+            stop_result: None,
+        };
+        if ready_rx.recv().is_err() {
+            watcher.stop()?;
+            return Err(LoaderError::Validation(
+                "entry-tree watcher stopped during initial refresh".into(),
+            ));
+        }
+        Ok(watcher)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn snapshot(&self) -> EntryTreeWatcherSnapshot {
+        lock_watcher(&self.control.state).snapshot.clone()
+    }
+
+    /// Returns the context belonging to the last committed tree.
+    pub fn context(&self) -> ContextHandle {
+        lock_watcher(&self.control.state).context.clone()
+    }
+
+    /// Stops once, joins the worker, and returns the same result on later calls.
+    pub fn stop(&mut self) -> LoaderResult<()> {
+        if let Some(result) = &self.stop_result {
+            return result.clone();
+        }
+        self.control.stopping.store(true, Ordering::Release);
+        self.control.stop.notify_one();
+        let result = match self.worker.take() {
+            Some(worker) => worker.join().unwrap_or_else(|_| {
+                Err(LoaderError::Validation(
+                    "entry-tree watcher worker panicked".into(),
+                ))
+            }),
+            None => Ok(()),
+        };
+        self.stop_result = Some(result.clone());
+        result
+    }
+}
+
+impl Drop for EntryTreeWatcher {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+#[derive(PartialEq)]
+enum WatchedSource {
+    Present(Vec<u8>),
+    Unreadable(String),
+}
+
 struct LiveEntry {
     entry: Entry,
     handle: Box<dyn RuntimeHandle>,
@@ -722,6 +909,108 @@ impl Loader {
             error: Some(error),
         });
     }
+}
+
+async fn run_entry_tree_watcher(
+    mut loader: Loader,
+    path: PathBuf,
+    options: EntryTreeWatcherOptions,
+    control: Arc<EntryTreeWatcherControl>,
+    ready: mpsc::SyncSender<()>,
+) -> LoaderResult<()> {
+    let mut observed = observe_source(&path, options.max_source_bytes);
+    apply_watched_source(&mut loader, &observed, &control).await;
+    let _ = ready.send(());
+    // ponytail: whole-file polling coalesces intermediate writes; use OS notifications
+    // if idle I/O for many watched files becomes material. The runtime stays driven.
+    while !control.stopping.load(Ordering::Acquire) {
+        let _ = tokio::time::timeout(options.poll_interval, control.stop.notified()).await;
+        if control.stopping.load(Ordering::Acquire) {
+            break;
+        }
+        let source = observe_source(&path, options.max_source_bytes);
+        if source != observed {
+            apply_watched_source(&mut loader, &source, &control).await;
+            observed = source;
+        }
+    }
+    let result = loader.unload().await;
+    let mut state = lock_watcher(&control.state);
+    state.snapshot.running = false;
+    state.snapshot.tree = loader.tree().clone();
+    state.context = loader.context();
+    if let Err(error) = &result {
+        state.snapshot.last_error = Some(error.clone());
+    }
+    result
+}
+
+fn observe_source(path: &Path, limit: usize) -> WatchedSource {
+    let read = || -> std::io::Result<Vec<u8>> {
+        if !fs::metadata(path)?.is_file() {
+            return Err(std::io::Error::other("watch source must be a regular file"));
+        }
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Avoid blocking if a regular source is swapped for a FIFO before open.
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.len() > limit as u64 {
+            return Err(std::io::Error::other(
+                "watch source is not a regular file within its byte limit",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        file.take(limit as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > limit {
+            return Err(std::io::Error::other("watch source exceeds its byte limit"));
+        }
+        Ok(bytes)
+    };
+    match read() {
+        Ok(bytes) => WatchedSource::Present(bytes),
+        Err(error) => WatchedSource::Unreadable(error.to_string()),
+    }
+}
+
+async fn apply_watched_source(
+    loader: &mut Loader,
+    source: &WatchedSource,
+    control: &EntryTreeWatcherControl,
+) {
+    let candidate = match source {
+        WatchedSource::Present(bytes) => std::str::from_utf8(bytes)
+            .map_err(|error| LoaderError::Parse(error.to_string()))
+            .and_then(parse_entry_tree),
+        WatchedSource::Unreadable(error) => Err(LoaderError::Persistence(error.clone())),
+    };
+    let result = match candidate {
+        Ok(tree) => loader.replace(tree).await,
+        Err(error) => Err(error),
+    };
+    let mut state = lock_watcher(&control.state);
+    state.context = loader.context();
+    match result {
+        Ok(()) => {
+            state.snapshot.tree = loader.tree().clone();
+            state.snapshot.committed_updates = state.snapshot.committed_updates.saturating_add(1);
+        }
+        Err(error) => {
+            state.snapshot.rejected_updates = state.snapshot.rejected_updates.saturating_add(1);
+            state.snapshot.last_error = Some(error);
+        }
+    }
+}
+
+fn lock_watcher<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 async fn import_entry(

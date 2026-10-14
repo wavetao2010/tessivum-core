@@ -24,7 +24,7 @@ interface Context {
   serial(name: string, ...args: unknown[]): Promise<unknown>
   bail(name: string, ...args: unknown[]): unknown
   waterfall(name: string, ...args: unknown[]): unknown
-  plugin(plugin: { name: string, apply(context: Context): unknown }): Fiber
+  plugin(plugin: { name: string, inject?: string[] | Record<string, unknown>, apply(context: Context): unknown }): Fiber
   effect(execute: () => unknown, label: string): Disposer
   provide(name: string, value: object): Disposer
   extend(meta?: Record<PropertyKey, unknown>): Context
@@ -45,10 +45,11 @@ interface Context {
 }
 
 type ContextConstructor = { new (): Context, readonly filter: symbol }
+type ServiceConstructor = { new (ctx: Context, name: string): object, readonly resolveConfig: symbol }
 // Static imports would make tsc typecheck Cordis's vendored source.
 const vendorRoot = resolve(process.env.CORDIS_VENDOR_ROOT ?? fileURLToPath(new URL('../../../upstream/deepseek-harness/vendor/', import.meta.url)))
 const cordisRoot = existsSync(join(vendorRoot, 'cordis')) ? join(vendorRoot, 'cordis') : vendorRoot
-const { Context } = await import(pathToFileURL(join(cordisRoot, 'src/index.ts')).href) as { Context: ContextConstructor }
+const { Context, Service } = await import(pathToFileURL(join(cordisRoot, 'src/index.ts')).href) as { Context: ContextConstructor, Service: ServiceConstructor }
 
 const states = ['PENDING', 'LOADING', 'ACTIVE', 'FAILED', 'DISPOSED', 'UNLOADING']
 type Input = Record<string, unknown>
@@ -259,12 +260,11 @@ async function service(root: Context, trace: Trace, input: Input) {
 const serviceCatalogCases = ['late-provider', 'provider-replacement', 'provider-removal-recovery', 'optional-dependency', 'duplicate-provider', 'isolate-realms', 'shared-realm', 'intercept-merge', 'stale-generation'] as const
 type ServiceCatalogCase = typeof serviceCatalogCases[number]
 
-function serviceCatalogCaseIds(input: Input): ServiceCatalogCase[] {
-  if (!Array.isArray(input.cases) || !input.cases.length) throw new Error('service catalog requires a nonempty cases list')
+function catalogCaseIds<T extends string>(input: Input, supported: readonly T[], catalog: string): T[] {
+  if (!Array.isArray(input.cases) || !input.cases.length) throw new Error(`${catalog} catalog requires a nonempty cases list`)
   return input.cases.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item) || !('id' in item) || typeof item.id !== 'string' || !(serviceCatalogCases as readonly string[]).includes(item.id)) throw new Error(`unsupported service catalog case ${JSON.stringify(item)}`)
-    const id = item.id
-    return id as ServiceCatalogCase
+    if (!item || typeof item !== 'object' || Array.isArray(item) || Object.keys(item).length !== 1 || !('id' in item) || typeof item.id !== 'string' || !supported.includes(item.id as T)) throw new Error(`unsupported ${catalog} catalog case ${JSON.stringify(item)}`)
+    return item.id as T
   })
 }
 
@@ -274,30 +274,104 @@ function serviceValue(root: Context, name: string): string {
   return value.value
 }
 
+function catalogProvider(root: Context, name: string, value: string) {
+  return root.plugin({
+    name: `${name}-provider-${value}`,
+    apply(ctx) {
+      ctx.provide(name, { value, read(this: { value: string }) { return this.value } })
+    },
+  })
+}
+
+function requiredServiceConsumer(root: Context, name: string) {
+  const lifecycle = { starts: 0, stops: 0 }
+  const fiber = root.plugin({
+    name: `${name}-consumer`,
+    inject: [name],
+    apply() {
+      lifecycle.starts++
+      return () => { lifecycle.stops++ }
+    },
+  })
+  return { fiber, lifecycle }
+}
+
+function serviceOperation(value: unknown) {
+  if (!value || typeof value !== 'object' || !('read' in value) || typeof value.read !== 'function') throw new Error('service reference has no read operation')
+  try {
+    return { stale: false, value: value.read() }
+  } catch {
+    return { stale: true, value: null }
+  }
+}
+
 async function serviceCatalogCase(root: Context, id: ServiceCatalogCase): Promise<unknown> {
   switch (id) {
     case 'late-provider': {
-      const readyBefore = false
-      root.provide('clock', { value: 'wall' })
-      return { readyBefore, readyAfter: root.get('clock') !== undefined, visible: serviceValue(root, 'clock') }
+      const consumer = requiredServiceConsumer(root, 'clock')
+      await consumer.fiber
+      const readyBefore = states[consumer.fiber.state] === 'ACTIVE'
+      const provider = catalogProvider(root, 'clock', 'wall')
+      await provider
+      await consumer.fiber
+      const readyAfter = states[consumer.fiber.state] === 'ACTIVE'
+      const visible = serviceValue(root, 'clock')
+      await provider.dispose()
+      await consumer.fiber
+      const readyAfterRemoval = states[consumer.fiber.state] === 'ACTIVE'
+      await consumer.fiber.dispose()
+      return { consumer: consumer.lifecycle, readyAfter, readyAfterRemoval, readyBefore, visible }
     }
-    case 'provider-replacement':
-    case 'stale-generation': {
-      const name = id === 'provider-replacement' ? 'theme' : 'session'
-      const remove = root.provide(name, { value: 'light' })
-      await remove()
-      root.provide(name, { value: 'dark' })
-      return { oldStale: true, visible: serviceValue(root, name) }
+    case 'provider-replacement': {
+      const consumer = requiredServiceConsumer(root, 'theme')
+      const first = catalogProvider(root, 'theme', 'light')
+      await first
+      await consumer.fiber
+      const oldReference = root.get('theme')
+      await first.dispose()
+      await consumer.fiber
+      const replacement = catalogProvider(root, 'theme', 'dark')
+      await replacement
+      await consumer.fiber
+      const value = { consumer: { ...consumer.lifecycle }, oldOperation: serviceOperation(oldReference), visible: serviceValue(root, 'theme') }
+      await consumer.fiber.dispose()
+      return value
     }
     case 'provider-removal-recovery': {
-      const remove = root.provide('cache', { value: 'old' })
-      await remove()
+      const consumer = requiredServiceConsumer(root, 'cache')
+      const first = catalogProvider(root, 'cache', 'old')
+      await first
+      await consumer.fiber
+      const oldReference = root.get('cache')
+      await first.dispose()
+      await consumer.fiber
       const missingAfterRemoval = root.get('cache') === undefined
-      root.provide('cache', { value: 'new' })
-      return { missingAfterRemoval, oldStale: true, visible: serviceValue(root, 'cache') }
+      const oldAfterRemoval = serviceOperation(oldReference)
+      const replacement = catalogProvider(root, 'cache', 'new')
+      await replacement
+      await consumer.fiber
+      const value = {
+        consumer: { ...consumer.lifecycle },
+        missingAfterRemoval,
+        oldAfterRecovery: serviceOperation(oldReference),
+        oldAfterRemoval,
+        visible: serviceValue(root, 'cache'),
+      }
+      await consumer.fiber.dispose()
+      return value
     }
-    case 'optional-dependency':
-      return { ready: true, visible: null }
+    case 'optional-dependency': {
+      let starts = 0
+      let visible: unknown
+      const consumer = root.plugin({
+        name: 'metrics-consumer',
+        apply(ctx) { starts++; visible = ctx.get('metrics') ?? null },
+      })
+      await consumer
+      const value = { ready: states[consumer.state] === 'ACTIVE', starts, visible }
+      await consumer.dispose()
+      return value
+    }
     case 'duplicate-provider': {
       root.provide('logger', { value: 'first' })
       let duplicateRejected = false
@@ -318,15 +392,37 @@ async function serviceCatalogCase(root: Context, id: ServiceCatalogCase): Promis
       return { visible: serviceValue(beta, 'bus') }
     }
     case 'intercept-merge': {
-      const parent = root.intercept('config', { retry: { attempts: 1 }, source: 'parent' })
-      parent.intercept('config', { retry: { backoff: 'fast' }, source: 'child' })
-      return { config: { retry: { backoff: 'fast' }, source: 'child' } }
+      const context = root
+        .intercept('config', { retry: { attempts: 1 }, source: 'parent' })
+        .intercept('config', { retry: { backoff: 'fast' }, source: 'child' })
+      let config: unknown
+      const consumer = context.plugin({
+        name: 'config-consumer',
+        apply(ctx) {
+          const instance = new Service(ctx, 'config')
+          const resolveConfig = Reflect.get(instance, Service.resolveConfig)
+          if (typeof resolveConfig !== 'function') throw new Error('Service config resolver is unavailable')
+          config = resolveConfig.call(instance)
+        },
+      })
+      await consumer
+      await consumer.dispose()
+      return { config }
+    }
+    case 'stale-generation': {
+      const first = catalogProvider(root, 'session', 'light')
+      await first
+      const oldReference = root.get('session')
+      await first.dispose()
+      const replacement = catalogProvider(root, 'session', 'dark')
+      await replacement
+      return { oldOperation: serviceOperation(oldReference), visible: serviceValue(root, 'session') }
     }
   }
 }
 
 async function serviceCatalog(trace: Trace, input: Input) {
-  for (const id of serviceCatalogCaseIds(input)) {
+  for (const id of catalogCaseIds(input, serviceCatalogCases, 'service')) {
     const root = new Context()
     try {
       trace.add({ event: 'service-provided', subject: id, phase: 'catalog', value: await serviceCatalogCase(root, id) })
@@ -399,6 +495,7 @@ async function serviceRegistration(trace: Trace, input: Input) {
 
 const eventModes = {
   'emit-ordering': 'emit',
+  'emit-error-propagation': 'emit',
   'parallel-aggregate': 'parallel',
   'serial-bail': 'serial',
   'sync-bail': 'bail',
@@ -413,20 +510,6 @@ const eventModes = {
 
 type EventCase = keyof typeof eventModes
 
-function isEventCase(id: string): id is EventCase {
-  return Object.prototype.hasOwnProperty.call(eventModes, id)
-}
-
-function eventCaseIds(input: Input): EventCase[] {
-  if (!Array.isArray(input.cases) || !input.cases.length) throw new Error('event catalog requires a nonempty cases list')
-  return input.cases.map((item) => {
-    if (!item || typeof item !== 'object' || Array.isArray(item) || !('id' in item)) throw new Error(`malformed event catalog case ${JSON.stringify(item)}`)
-    const keys = Object.keys(item)
-    if (keys.length !== 1 || keys[0] !== 'id' || typeof item.id !== 'string' || !item.id.trim()) throw new Error(`malformed event catalog case ${JSON.stringify(item)}`)
-    if (!isEventCase(item.id)) throw new Error(`unsupported event catalog case ${JSON.stringify(item.id)}`)
-    return item.id
-  })
-}
 
 async function withEventOwner<T>(root: Context, id: EventCase, execute: (owner: Context) => T | Promise<T>): Promise<T> {
   let owner: Context | undefined
@@ -452,6 +535,22 @@ async function executeEventCase(root: Context, id: EventCase): Promise<unknown> 
         owner.on(id, () => calls.push('second'))
         owner.emit(id)
         return { calls }
+      }
+      case 'emit-error-propagation': {
+        const calls: string[] = []
+        owner.on(id, () => {
+          calls.push('first')
+          throw new Error('listener exploded')
+        })
+        owner.on(id, () => calls.push('remaining'))
+        let error: string | undefined
+        try {
+          owner.emit(id)
+        } catch (reason) {
+          error = reason instanceof Error ? reason.message : String(reason)
+        }
+        if (error === undefined) throw new Error('emit did not propagate its listener failure')
+        return { calls, error }
       }
       case 'parallel-aggregate': {
         const calls: string[] = []
@@ -559,7 +658,7 @@ async function executeEventCase(root: Context, id: EventCase): Promise<unknown> 
 }
 
 async function eventCatalog(root: Context, trace: Trace, input: Input) {
-  for (const id of eventCaseIds(input)) {
+  for (const id of catalogCaseIds(input, Object.keys(eventModes) as EventCase[], 'event')) {
     trace.add({ event: 'event-dispatched', subject: id, phase: eventModes[id], value: await executeEventCase(root, id) })
   }
 }

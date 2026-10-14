@@ -1,0 +1,1468 @@
+{
+  "schemaVersion": "tessivum.c1-admission/v1",
+  "recorded": "2026-10-14",
+  "platform": "darwin arm64",
+  "frozenHarness": "47f943859bef60e4160492346772ded9b24f765a",
+  "rustTests": {
+    "passed": 130
+  },
+  "strictClippy": "PASS",
+  "typescript": "PASS",
+  "fixtures": [
+    {
+      "fixture": "lifecycle",
+      "sha256": "d4cba6a37d1d1cda7067cce6318c79c401558035612d249a341174e709081c21",
+      "rust": {
+        "executedCases": [
+          "sync-start",
+          "async-start",
+          "sync-cleanup",
+          "async-cleanup",
+          "iterable-cleanup",
+          "nested-effect",
+          "reverse-disposal",
+          "repeated-disposal",
+          "reentrant-disposal",
+          "failed-start-rollback",
+          "parent-child-quiescence",
+          "unload-registration-rejection"
+        ],
+        "fixture": "lifecycle.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "sync-start",
+            "value": {
+              "disposed": true,
+              "state": "ACTIVE"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "async-start",
+            "value": {
+              "disposed": true,
+              "state": "ACTIVE"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "sync-cleanup",
+            "value": {
+              "calls": 1
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "async-cleanup",
+            "value": {
+              "calls": 1
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "iterable-cleanup",
+            "value": {
+              "order": [
+                "second",
+                "first"
+              ]
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "nested-effect",
+            "value": {
+              "calls": 1,
+              "childDisposed": true
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "reverse-disposal",
+            "value": {
+              "order": [
+                "second",
+                "first"
+              ]
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "repeated-disposal",
+            "value": {
+              "calls": 1
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "reentrant-disposal",
+            "value": {
+              "calls": 1,
+              "state": "DISPOSED"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "failed-start-rollback",
+            "value": {
+              "cleanupCalls": 1,
+              "state": "FAILED"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "parent-child-quiescence",
+            "value": {
+              "childDisposed": true,
+              "order": [
+                "child",
+                "parent"
+              ]
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "unload-registration-rejection",
+            "value": {
+              "rejected": true
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "lifecycle.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "sync-start",
+            "value": {
+              "disposed": true,
+              "state": "ACTIVE"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "async-start",
+            "value": {
+              "disposed": true,
+              "state": "ACTIVE"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "sync-cleanup",
+            "value": {
+              "calls": 1
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "async-cleanup",
+            "value": {
+              "calls": 1
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "iterable-cleanup",
+            "value": {
+              "order": [
+                "second",
+                "first"
+              ]
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "nested-effect",
+            "value": {
+              "calls": 1,
+              "childDisposed": true
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "reverse-disposal",
+            "value": {
+              "order": [
+                "second",
+                "first"
+              ]
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "repeated-disposal",
+            "value": {
+              "calls": 1
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "reentrant-disposal",
+            "value": {
+              "calls": 1,
+              "state": "DISPOSED"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "failed-start-rollback",
+            "value": {
+              "cleanupCalls": 1,
+              "state": "FAILED"
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "parent-child-quiescence",
+            "value": {
+              "childDisposed": true,
+              "order": [
+                "child",
+                "parent"
+              ]
+            }
+          },
+          {
+            "event": "effect-disposed",
+            "phase": "catalog",
+            "subject": "unload-registration-rejection",
+            "value": {
+              "rejected": true
+            }
+          }
+        ]
+      },
+      "acceptedDifference": null
+    },
+    {
+      "fixture": "services",
+      "sha256": "47823ab990aba1d9d4d4b56b21059313ce1561e7882f4dffa21339ced822dfa3",
+      "rust": {
+        "executedCases": [
+          "late-provider",
+          "optional-dependency",
+          "duplicate-provider",
+          "isolate-realms",
+          "shared-realm",
+          "intercept-merge"
+        ],
+        "fixture": "service.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "late-provider",
+            "value": {
+              "consumer": {
+                "starts": 1,
+                "stops": 1
+              },
+              "readyAfter": true,
+              "readyAfterRemoval": false,
+              "readyBefore": false,
+              "visible": "wall"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "optional-dependency",
+            "value": {
+              "ready": true,
+              "starts": 1,
+              "visible": null
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "duplicate-provider",
+            "value": {
+              "duplicateRejected": true,
+              "visible": "first"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "isolate-realms",
+            "value": {
+              "alpha": "alpha",
+              "betaMissing": true
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "shared-realm",
+            "value": {
+              "visible": "shared"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "intercept-merge",
+            "value": {
+              "config": {
+                "retry": {
+                  "backoff": "fast"
+                },
+                "source": "child"
+              }
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "service.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "late-provider",
+            "value": {
+              "consumer": {
+                "starts": 1,
+                "stops": 1
+              },
+              "readyAfter": true,
+              "readyAfterRemoval": false,
+              "readyBefore": false,
+              "visible": "wall"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "optional-dependency",
+            "value": {
+              "ready": true,
+              "starts": 1,
+              "visible": null
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "duplicate-provider",
+            "value": {
+              "duplicateRejected": true,
+              "visible": "first"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "isolate-realms",
+            "value": {
+              "alpha": "alpha",
+              "betaMissing": true
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "shared-realm",
+            "value": {
+              "visible": "shared"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "intercept-merge",
+            "value": {
+              "config": {
+                "retry": {
+                  "backoff": "fast"
+                },
+                "source": "child"
+              }
+            }
+          }
+        ]
+      },
+      "acceptedDifference": null
+    },
+    {
+      "fixture": "service-registration",
+      "sha256": "3605c4ded365570985093f064bb993b2272ff57c7340fa1139d1365f3397f152",
+      "rust": {
+        "executedCases": [
+          "same-owner-duplicate",
+          "different-owner-duplicate",
+          "dispose-then-reprovide"
+        ],
+        "fixture": "service.registration",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "service-provided",
+            "phase": "registration",
+            "subject": "same-owner-duplicate",
+            "value": {
+              "duplicateRejected": true,
+              "visible": "first"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "registration",
+            "subject": "different-owner-duplicate",
+            "value": {
+              "duplicateRejected": true,
+              "visible": "first"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "registration",
+            "subject": "dispose-then-reprovide",
+            "value": {
+              "missingAfterDispose": true,
+              "visible": "second"
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "service.registration",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "service-provided",
+            "phase": "registration",
+            "subject": "same-owner-duplicate",
+            "value": {
+              "duplicateRejected": true,
+              "visible": "first"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "registration",
+            "subject": "different-owner-duplicate",
+            "value": {
+              "duplicateRejected": true,
+              "visible": "first"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "registration",
+            "subject": "dispose-then-reprovide",
+            "value": {
+              "missingAfterDispose": true,
+              "visible": "second"
+            }
+          }
+        ]
+      },
+      "acceptedDifference": null
+    },
+    {
+      "fixture": "events",
+      "sha256": "94d7c62deb67eab133a93a25d891d93b1c38901a648bcf973c52da7275fad507",
+      "rust": {
+        "executedCases": [
+          "emit-ordering",
+          "emit-error-propagation",
+          "parallel-aggregate",
+          "serial-bail",
+          "sync-bail",
+          "waterfall-next",
+          "waterfall-short-circuit",
+          "waterfall-wrap",
+          "prepend",
+          "scoped-filter",
+          "listener-self-removal",
+          "owner-disposal-during-dispatch"
+        ],
+        "fixture": "event.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "emit-ordering",
+            "value": {
+              "calls": [
+                "first",
+                "second"
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "emit-error-propagation",
+            "value": {
+              "calls": [
+                "first"
+              ],
+              "error": "listener exploded"
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "parallel",
+            "subject": "parallel-aggregate",
+            "value": {
+              "calls": [
+                "first",
+                "second",
+                "third"
+              ],
+              "errors": 2
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "serial",
+            "subject": "serial-bail",
+            "value": {
+              "calls": [
+                "null",
+                "false",
+                "stop"
+              ],
+              "result": "stop"
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "bail",
+            "subject": "sync-bail",
+            "value": {
+              "calls": [
+                "null",
+                "false",
+                "stop"
+              ],
+              "result": "stop"
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "waterfall",
+            "subject": "waterfall-next",
+            "value": {
+              "calls": [
+                "first",
+                "second"
+              ],
+              "result": {
+                "next": "start"
+              }
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "waterfall",
+            "subject": "waterfall-short-circuit",
+            "value": {
+              "calls": [
+                "veto"
+              ],
+              "result": {
+                "veto": "blocked"
+              }
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "waterfall",
+            "subject": "waterfall-wrap",
+            "value": {
+              "calls": [
+                "before",
+                "terminal",
+                "after"
+              ],
+              "result": {
+                "outer": {
+                  "terminal": {
+                    "inner": "start"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "prepend",
+            "value": {
+              "calls": [
+                "prepend",
+                "first",
+                "second"
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "scoped-filter",
+            "value": {
+              "calls": [
+                "alpha"
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "listener-self-removal",
+            "value": {
+              "dispatches": [
+                [
+                  "self",
+                  "stable"
+                ],
+                [
+                  "stable"
+                ]
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "serial",
+            "subject": "owner-disposal-during-dispatch",
+            "value": {
+              "dispatches": [
+                [
+                  "dispose",
+                  "downstream"
+                ],
+                []
+              ]
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "event.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "emit-ordering",
+            "value": {
+              "calls": [
+                "first",
+                "second"
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "emit-error-propagation",
+            "value": {
+              "calls": [
+                "first"
+              ],
+              "error": "listener exploded"
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "parallel",
+            "subject": "parallel-aggregate",
+            "value": {
+              "calls": [
+                "first",
+                "second",
+                "third"
+              ],
+              "errors": 2
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "serial",
+            "subject": "serial-bail",
+            "value": {
+              "calls": [
+                "null",
+                "false",
+                "stop"
+              ],
+              "result": "stop"
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "bail",
+            "subject": "sync-bail",
+            "value": {
+              "calls": [
+                "null",
+                "false",
+                "stop"
+              ],
+              "result": "stop"
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "waterfall",
+            "subject": "waterfall-next",
+            "value": {
+              "calls": [
+                "first",
+                "second"
+              ],
+              "result": {
+                "next": "start"
+              }
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "waterfall",
+            "subject": "waterfall-short-circuit",
+            "value": {
+              "calls": [
+                "veto"
+              ],
+              "result": {
+                "veto": "blocked"
+              }
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "waterfall",
+            "subject": "waterfall-wrap",
+            "value": {
+              "calls": [
+                "before",
+                "terminal",
+                "after"
+              ],
+              "result": {
+                "outer": {
+                  "terminal": {
+                    "inner": "start"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "prepend",
+            "value": {
+              "calls": [
+                "prepend",
+                "first",
+                "second"
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "scoped-filter",
+            "value": {
+              "calls": [
+                "alpha"
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "emit",
+            "subject": "listener-self-removal",
+            "value": {
+              "dispatches": [
+                [
+                  "self",
+                  "stable"
+                ],
+                [
+                  "stable"
+                ]
+              ]
+            }
+          },
+          {
+            "event": "event-dispatched",
+            "phase": "serial",
+            "subject": "owner-disposal-during-dispatch",
+            "value": {
+              "dispatches": [
+                [
+                  "dispose",
+                  "downstream"
+                ],
+                []
+              ]
+            }
+          }
+        ]
+      },
+      "acceptedDifference": null
+    },
+    {
+      "fixture": "loader",
+      "sha256": "d05cafdb46642b857e8f72e17e9c359d04a34389aed75ea3a8fbac2070d0d1f9",
+      "rust": {
+        "executedCases": [
+          "unordered-dependencies",
+          "duplicate-id",
+          "add-update-remove-move",
+          "config-only-update",
+          "plugin-replacement",
+          "candidate-failure",
+          "rollback-failure",
+          "nested-group",
+          "patch-insertion-later-targeting",
+          "atomic-write"
+        ],
+        "fixture": "loader.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "unordered-dependencies",
+            "value": {
+              "consumerActive": true
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "duplicate-id",
+            "value": {
+              "duplicateRejected": true
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "add-update-remove-move",
+            "value": {
+              "ids": [
+                "third",
+                "second"
+              ]
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "config-only-update",
+            "value": {
+              "revision": 2
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "plugin-replacement",
+            "value": {
+              "active": "replacement"
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "candidate-failure",
+            "value": {
+              "tree": "old"
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "rollback-failure",
+            "value": {
+              "rollbackFailed": true,
+              "tree": "old"
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "nested-group",
+            "value": {
+              "activeEntries": 1
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "patch-insertion-later-targeting",
+            "value": {
+              "patched": true
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "atomic-write",
+            "value": {
+              "persisted": true
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "loader.core-catalog",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "unordered-dependencies",
+            "value": {
+              "consumerActive": true
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "duplicate-id",
+            "value": {
+              "duplicateRejected": true
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "add-update-remove-move",
+            "value": {
+              "ids": [
+                "third",
+                "second"
+              ]
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "config-only-update",
+            "value": {
+              "revision": 2
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "plugin-replacement",
+            "value": {
+              "active": "replacement"
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "candidate-failure",
+            "value": {
+              "tree": "old"
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "rollback-failure",
+            "value": {
+              "rollbackFailed": true,
+              "tree": "old"
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "nested-group",
+            "value": {
+              "activeEntries": 1
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "patch-insertion-later-targeting",
+            "value": {
+              "patched": true
+            }
+          },
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "atomic-write",
+            "value": {
+              "persisted": true
+            }
+          }
+        ]
+      },
+      "acceptedDifference": null
+    },
+    {
+      "fixture": "loader-dependencies",
+      "sha256": "8f6708d1d114284915c780fcdc5cf65750e14b07561fb7454aeccd046113ac58",
+      "rust": {
+        "executedCases": [
+          "pending",
+          "provider-added",
+          "provider-removed",
+          "provider-restored",
+          "unloaded"
+        ],
+        "fixture": "loader.dependency-lifecycle",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "config-committed",
+            "subject": "pending",
+            "value": {
+              "result": null
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "provider-added",
+            "value": {
+              "result": {
+                "value": "first"
+              }
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "provider-removed",
+            "value": {
+              "result": null
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "provider-restored",
+            "value": {
+              "result": {
+                "value": "second"
+              }
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "unloaded",
+            "value": {
+              "result": null
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "loader.dependency-lifecycle",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "config-committed",
+            "subject": "pending",
+            "value": {
+              "result": null
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "provider-added",
+            "value": {
+              "result": {
+                "value": "first"
+              }
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "provider-removed",
+            "value": {
+              "result": null
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "provider-restored",
+            "value": {
+              "result": {
+                "value": "second"
+              }
+            }
+          },
+          {
+            "event": "config-committed",
+            "subject": "unloaded",
+            "value": {
+              "result": null
+            }
+          }
+        ]
+      },
+      "acceptedDifference": null
+    },
+    {
+      "fixture": "loader-pending-config",
+      "sha256": "b152c5e5fca630879bc8e247a193e8f8d3f0ad8ffe9b1f2870b0444842c8649a",
+      "rust": {
+        "executedCases": [
+          "pending-config-rollback"
+        ],
+        "fixture": "loader.pending-config-rollback",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "pending-config-rollback",
+            "value": {
+              "observations": [
+                null,
+                null,
+                {
+                  "label": "ready"
+                },
+                {
+                  "label": "ready"
+                },
+                {
+                  "label": "stale"
+                },
+                null
+              ],
+              "rejected": true,
+              "sourcePreserved": true,
+              "startsWhilePending": 0
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "loader.pending-config-rollback",
+        "status": "MISMATCH",
+        "trace": [
+          {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "pending-config-rollback",
+            "value": {
+              "observations": [
+                null,
+                null,
+                {
+                  "label": "stale",
+                  "obsolete": true
+                },
+                {
+                  "label": "ready"
+                },
+                {
+                  "label": "stale"
+                },
+                null
+              ],
+              "rejected": true,
+              "sourcePreserved": true,
+              "startsWhilePending": 0
+            }
+          }
+        ],
+        "error": {
+          "code": "TRACE_MISMATCH",
+          "fixture": "loader.pending-config-rollback",
+          "event": 0,
+          "message": "trace mismatch at event 0",
+          "expected": {
+            "event": "config-committed",
+            "subject": "pending-config-rollback",
+            "phase": "catalog",
+            "value": {
+              "observations": [
+                null,
+                null,
+                {
+                  "label": "ready"
+                },
+                {
+                  "label": "ready"
+                },
+                {
+                  "label": "stale"
+                },
+                null
+              ],
+              "startsWhilePending": 0,
+              "rejected": true,
+              "sourcePreserved": true
+            }
+          },
+          "actual": {
+            "event": "config-committed",
+            "phase": "catalog",
+            "subject": "pending-config-rollback",
+            "value": {
+              "observations": [
+                null,
+                null,
+                {
+                  "label": "stale",
+                  "obsolete": true
+                },
+                {
+                  "label": "ready"
+                },
+                {
+                  "label": "stale"
+                },
+                null
+              ],
+              "rejected": true,
+              "sourcePreserved": true,
+              "startsWhilePending": 0
+            }
+          }
+        }
+      },
+      "acceptedDifference": "pending-config-uses-latest-source"
+    },
+    {
+      "fixture": "service-retained-references",
+      "sha256": "3fcf57f69c82013dbb604885c01e8ad79d3f42e8f4d0084b37de2599804fdf97",
+      "rust": {
+        "executedCases": [
+          "provider-replacement",
+          "provider-removal-recovery",
+          "stale-generation"
+        ],
+        "fixture": "service.retained-references",
+        "status": "PASS",
+        "trace": [
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "provider-replacement",
+            "value": {
+              "consumer": {
+                "starts": 2,
+                "stops": 1
+              },
+              "oldOperation": {
+                "stale": true,
+                "value": null
+              },
+              "visible": "dark"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "provider-removal-recovery",
+            "value": {
+              "consumer": {
+                "starts": 2,
+                "stops": 1
+              },
+              "missingAfterRemoval": true,
+              "oldAfterRecovery": {
+                "stale": true,
+                "value": null
+              },
+              "oldAfterRemoval": {
+                "stale": true,
+                "value": null
+              },
+              "visible": "new"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "stale-generation",
+            "value": {
+              "oldOperation": {
+                "stale": true,
+                "value": null
+              },
+              "visible": "dark"
+            }
+          }
+        ]
+      },
+      "upstream": {
+        "fixture": "service.retained-references",
+        "status": "MISMATCH",
+        "trace": [
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "provider-replacement",
+            "value": {
+              "consumer": {
+                "starts": 2,
+                "stops": 1
+              },
+              "oldOperation": {
+                "stale": false,
+                "value": "light"
+              },
+              "visible": "dark"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "provider-removal-recovery",
+            "value": {
+              "consumer": {
+                "starts": 2,
+                "stops": 1
+              },
+              "missingAfterRemoval": true,
+              "oldAfterRecovery": {
+                "stale": false,
+                "value": "old"
+              },
+              "oldAfterRemoval": {
+                "stale": false,
+                "value": "old"
+              },
+              "visible": "new"
+            }
+          },
+          {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "stale-generation",
+            "value": {
+              "oldOperation": {
+                "stale": false,
+                "value": "light"
+              },
+              "visible": "dark"
+            }
+          }
+        ],
+        "error": {
+          "code": "TRACE_MISMATCH",
+          "fixture": "service.retained-references",
+          "event": 0,
+          "message": "trace mismatch at event 0",
+          "expected": {
+            "event": "service-provided",
+            "subject": "provider-replacement",
+            "phase": "catalog",
+            "value": {
+              "consumer": {
+                "starts": 2,
+                "stops": 1
+              },
+              "oldOperation": {
+                "stale": true,
+                "value": null
+              },
+              "visible": "dark"
+            }
+          },
+          "actual": {
+            "event": "service-provided",
+            "phase": "catalog",
+            "subject": "provider-replacement",
+            "value": {
+              "consumer": {
+                "starts": 2,
+                "stops": 1
+              },
+              "oldOperation": {
+                "stale": false,
+                "value": "light"
+              },
+              "visible": "dark"
+            }
+          }
+        }
+      },
+      "acceptedDifference": "revoked-service-handles-reject-access"
+    }
+  ],
+  "watcher": {
+    "upstream": {
+      "watcher": "PASS",
+      "invalidPreservesCommitted": true,
+      "missingPreservesCommitted": true,
+      "latestConverged": true,
+      "recreated": true,
+      "closeWaitsInFlight": true,
+      "noPostCloseRefresh": true,
+      "unloaded": true,
+      "starts": 4,
+      "failures": 3
+    },
+    "rust": {
+      "status": "PASS",
+      "trace": [
+        {
+          "value": "initial"
+        },
+        {
+          "value": "initial"
+        },
+        {
+          "value": "latest"
+        },
+        {
+          "value": "latest"
+        },
+        {
+          "value": "recreated"
+        },
+        null
+      ],
+      "noPostStopCallbacks": true,
+      "repeatedStop": true
+    },
+    "regression": "entry_tree_watcher: real Native file changes, activation rejection, bounded/non-regular reads, idle task progress, in-flight stop and Drop cleanup",
+    "upstreamRuntime": "Node 22.23.3 --expose-internals --experimental-transform-types; source-package resolver maps workspace imports to unmodified vendored .ts and installed dependencies"
+  },
+  "limits": [
+    "Core data-file polling; intermediate writes may coalesce; no arbitrary JS or module HMR claim",
+    "Product D04 profile wiring, C2 Guest languages and release archives remain separate"
+  ]
+}

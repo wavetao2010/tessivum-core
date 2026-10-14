@@ -24,7 +24,8 @@ pub use ids::{FiberId, Generation, RealmLabel, ResourceId, ScopeId, ServiceKey};
 pub use lifecycle::{BoxDisposer, CancellationToken, EffectMeta, Fiber, FiberState, Scope};
 pub use loader::{
     apply_entry_patches, parse_entry_tree, persist_entry_tree, ActivationState, Entry, EntryGroup,
-    EntryId, EntryOptions, EntryTree, HmrDriver, Loader, LoaderFuture, LoaderResult, LoaderRuntime,
+    EntryId, EntryOptions, EntryTree, EntryTreeWatcher, EntryTreeWatcherOptions,
+    EntryTreeWatcherSnapshot, HmrDriver, Loader, LoaderFuture, LoaderResult, LoaderRuntime,
     PackageResolver, Patch, ResolvedPackage, RuntimeHandle, RuntimeKind,
 };
 pub use native::{

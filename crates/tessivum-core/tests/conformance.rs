@@ -14,6 +14,7 @@ fn full_catalog_executes_every_declared_case() {
     for name in [
         "lifecycle.json",
         "services.json",
+        "service-retained-references.json",
         "events.json",
         "loader.json",
         "loader-dependencies.json",

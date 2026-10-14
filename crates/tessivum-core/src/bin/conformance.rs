@@ -334,6 +334,107 @@ async fn lifecycle(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
 #[derive(Debug)]
 struct CatalogService(String);
 
+#[derive(Default)]
+struct CatalogConsumerLifecycle {
+    starts: usize,
+    stops: usize,
+}
+
+struct CatalogConsumer {
+    dependency: Dependency,
+    lifecycle: Arc<Mutex<CatalogConsumerLifecycle>>,
+}
+
+impl NativePlugin for CatalogConsumer {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "catalog-consumer".into(),
+            version: "1".into(),
+            dependencies: vec![self.dependency.clone()],
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(&'a mut self, _: ContextHandle, _: &'a Value) -> NativePluginFuture<'a> {
+        Box::pin(async move {
+            self.lifecycle
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .starts += 1;
+            Ok(())
+        })
+    }
+
+    fn update<'a>(&'a mut self, _: ContextHandle, _: &'a Value) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _: ContextHandle) -> NativePluginFuture<'a> {
+        Box::pin(async move {
+            self.lifecycle
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .stops += 1;
+            Ok(())
+        })
+    }
+}
+
+async fn catalog_consumer(
+    context: &ContextHandle,
+    dependency: Dependency,
+) -> Result<(Box<dyn RuntimeHandle>, Arc<Mutex<CatalogConsumerLifecycle>>), String> {
+    let lifecycle = Arc::new(Mutex::new(CatalogConsumerLifecycle::default()));
+    let observed = Arc::clone(&lifecycle);
+    let mut runtime = NativePluginRuntime::new();
+    let entry = catalog_entry("consumer")?;
+    runtime
+        .register(&entry.package, move || CatalogConsumer {
+            dependency: dependency.clone(),
+            lifecycle: Arc::clone(&observed),
+        })
+        .map_err(|error| error.to_string())?;
+    let handle = runtime
+        .instantiate(
+            ResolvedPackage {
+                specifier: entry.package.clone(),
+                location: entry.package.clone(),
+            },
+            entry,
+            context.clone(),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok((handle, lifecycle))
+}
+
+async fn catalog_ready(consumer: &mut dyn RuntimeHandle) -> Result<bool, String> {
+    consumer
+        .activation()
+        .await
+        .map(|state| state == tessivum_core::ActivationState::Active)
+        .map_err(|error| error.to_string())
+}
+
+fn catalog_lifecycle(lifecycle: &Arc<Mutex<CatalogConsumerLifecycle>>) -> Value {
+    let lifecycle = lifecycle
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    json!({"starts": lifecycle.starts, "stops": lifecycle.stops})
+}
+
+fn catalog_operation(
+    handle: &tessivum_core::ServiceHandle<CatalogService>,
+) -> Result<Value, String> {
+    match handle.with(|service| service.0.clone()) {
+        Ok(value) => Ok(json!({"stale": false, "value": value})),
+        Err(CoreError::StaleServiceHandle { .. }) => {
+            Ok(json!({"stale": true, "value": Value::Null}))
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 fn catalog_value(context: &ContextHandle, service: &ServiceKey) -> Result<Option<String>, String> {
     context
         .get::<CatalogService>(service)
@@ -350,76 +451,124 @@ async fn services_case(id: &str) -> Result<Value, String> {
     match id {
         "late-provider" => {
             let root = ContextHandle::root();
-            let service = ServiceKey::new("clock", "conformance/v1");
-            let subscription = root
-                .subscribe(vec![Dependency::Required(service.clone())], |_| {})
-                .map_err(|error| error.to_string())?;
-            let ready_before = subscription.ready();
-            root.provide(service.clone(), CatalogService("wall".into()))
-                .map_err(|error| error.to_string())?;
-            let ready_after = subscription.ready();
-            let visible = catalog_value(&root, &service)?.ok_or("late provider is missing")?;
-            root.scope()
-                .dispose()
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(json!({"readyBefore": ready_before, "readyAfter": ready_after, "visible": visible}))
-        }
-        "provider-replacement" | "stale-generation" => {
-            let root = ContextHandle::root();
-            let name = if id == "provider-replacement" {
-                "theme"
-            } else {
-                "session"
-            };
-            let service = ServiceKey::new(name, "conformance/v1");
-            let first = root
-                .provide(service.clone(), CatalogService("light".into()))
-                .map_err(|error| error.to_string())?;
-            root.replace(service.clone(), CatalogService("dark".into()))
-                .map_err(|error| error.to_string())?;
-            let old_stale = first.with(|_| ()).is_err();
-            let visible =
-                catalog_value(&root, &service)?.ok_or("replacement service is missing")?;
-            root.scope()
-                .dispose()
-                .await
-                .map_err(|error| error.to_string())?;
-            Ok(json!({"oldStale": old_stale, "visible": visible}))
-        }
-        "provider-removal-recovery" => {
-            let root = ContextHandle::root();
             let owner = root.child().map_err(|error| error.to_string())?;
-            let service = ServiceKey::new("cache", "conformance/v1");
-            let old = owner
-                .provide(service.clone(), CatalogService("old".into()))
+            let service = ServiceKey::new("clock", "conformance/v1");
+            let (mut consumer, lifecycle) =
+                catalog_consumer(&root, Dependency::Required(service.clone())).await?;
+            let ready_before = catalog_ready(consumer.as_mut()).await?;
+            owner
+                .provide(service.clone(), CatalogService("wall".into()))
                 .map_err(|error| error.to_string())?;
+            let ready_after = catalog_ready(consumer.as_mut()).await?;
+            let visible = catalog_value(&root, &service)?.ok_or("late provider is missing")?;
             owner
                 .scope()
                 .dispose()
                 .await
                 .map_err(|error| error.to_string())?;
-            let missing_after_removal = catalog_value(&root, &service)?.is_none();
-            let old_stale = old.with(|_| ()).is_err();
-            root.provide(service.clone(), CatalogService("new".into()))
+            let ready_after_removal = catalog_ready(consumer.as_mut()).await?;
+            consumer
+                .dispose()
+                .await
                 .map_err(|error| error.to_string())?;
-            let visible = catalog_value(&root, &service)?.ok_or("recovered service is missing")?;
+            let consumer = catalog_lifecycle(&lifecycle);
             root.scope()
                 .dispose()
                 .await
                 .map_err(|error| error.to_string())?;
             Ok(
-                json!({"missingAfterRemoval": missing_after_removal, "oldStale": old_stale, "visible": visible}),
+                json!({"consumer": consumer, "readyBefore": ready_before, "readyAfter": ready_after, "readyAfterRemoval": ready_after_removal, "visible": visible}),
             )
+        }
+        "provider-replacement" => {
+            let root = ContextHandle::root();
+            let service = ServiceKey::new("theme", "conformance/v1");
+            let (mut consumer, lifecycle) =
+                catalog_consumer(&root, Dependency::Required(service.clone())).await?;
+            catalog_ready(consumer.as_mut()).await?;
+            root.provide(service.clone(), CatalogService("light".into()))
+                .map_err(|error| error.to_string())?;
+            catalog_ready(consumer.as_mut()).await?;
+            let old_reference = root
+                .get::<CatalogService>(&service)
+                .map_err(|error| error.to_string())?
+                .ok_or("initial service is missing")?;
+            root.replace(service.clone(), CatalogService("dark".into()))
+                .map_err(|error| error.to_string())?;
+            catalog_ready(consumer.as_mut()).await?;
+            let value = json!({
+                "consumer": catalog_lifecycle(&lifecycle),
+                "oldOperation": catalog_operation(&old_reference)?,
+                "visible": catalog_value(&root, &service)?.ok_or("replacement service is missing")?,
+            });
+            consumer
+                .dispose()
+                .await
+                .map_err(|error| error.to_string())?;
+            root.scope()
+                .dispose()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(value)
+        }
+        "provider-removal-recovery" => {
+            let root = ContextHandle::root();
+            let owner = root.child().map_err(|error| error.to_string())?;
+            let service = ServiceKey::new("cache", "conformance/v1");
+            let (mut consumer, lifecycle) =
+                catalog_consumer(&root, Dependency::Required(service.clone())).await?;
+            catalog_ready(consumer.as_mut()).await?;
+            owner
+                .provide(service.clone(), CatalogService("old".into()))
+                .map_err(|error| error.to_string())?;
+            catalog_ready(consumer.as_mut()).await?;
+            let old_reference = root
+                .get::<CatalogService>(&service)
+                .map_err(|error| error.to_string())?
+                .ok_or("initial service is missing")?;
+            owner
+                .scope()
+                .dispose()
+                .await
+                .map_err(|error| error.to_string())?;
+            catalog_ready(consumer.as_mut()).await?;
+            let missing_after_removal = catalog_value(&root, &service)?.is_none();
+            let old_after_removal = catalog_operation(&old_reference)?;
+            root.provide(service.clone(), CatalogService("new".into()))
+                .map_err(|error| error.to_string())?;
+            catalog_ready(consumer.as_mut()).await?;
+            let value = json!({
+                "consumer": catalog_lifecycle(&lifecycle),
+                "missingAfterRemoval": missing_after_removal,
+                "oldAfterRecovery": catalog_operation(&old_reference)?,
+                "oldAfterRemoval": old_after_removal,
+                "visible": catalog_value(&root, &service)?.ok_or("recovered service is missing")?,
+            });
+            consumer
+                .dispose()
+                .await
+                .map_err(|error| error.to_string())?;
+            root.scope()
+                .dispose()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(value)
         }
         "optional-dependency" => {
             let root = ContextHandle::root();
             let service = ServiceKey::new("metrics", "conformance/v1");
-            let subscription = root
-                .subscribe(vec![Dependency::Optional(service.clone())], |_| {})
+            let (mut consumer, lifecycle) =
+                catalog_consumer(&root, Dependency::Optional(service.clone())).await?;
+            let ready = catalog_ready(consumer.as_mut()).await?;
+            let value = json!({
+                "ready": ready,
+                "starts": lifecycle.lock().unwrap_or_else(|poison| poison.into_inner()).starts,
+                "visible": catalog_value(&root, &service)?,
+            });
+            consumer
+                .dispose()
+                .await
                 .map_err(|error| error.to_string())?;
-            let value =
-                json!({"ready": subscription.ready(), "visible": catalog_value(&root, &service)?});
             root.scope()
                 .dispose()
                 .await
@@ -477,13 +626,34 @@ async fn services_case(id: &str) -> Result<Value, String> {
                 .map_err(|error| error.to_string())?;
             Ok(json!({"config": config}))
         }
+        "stale-generation" => {
+            let root = ContextHandle::root();
+            let service = ServiceKey::new("session", "conformance/v1");
+            root.provide(service.clone(), CatalogService("light".into()))
+                .map_err(|error| error.to_string())?;
+            let old_reference = root
+                .get::<CatalogService>(&service)
+                .map_err(|error| error.to_string())?
+                .ok_or("initial service is missing")?;
+            root.replace(service.clone(), CatalogService("dark".into()))
+                .map_err(|error| error.to_string())?;
+            let value = json!({
+                "oldOperation": catalog_operation(&old_reference)?,
+                "visible": catalog_value(&root, &service)?.ok_or("replacement service is missing")?,
+            });
+            root.scope()
+                .dispose()
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(value)
+        }
         other => Err(format!("unsupported service catalog case {other:?}")),
     }
 }
 
 async fn services(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {
     let mut trace = Vec::new();
-    for id in case_ids(fixture)? {
+    for id in strict_case_ids(fixture)? {
         trace.push(TraceEvent {
             kind: TraceEventKind::ServiceProvided,
             subject: Some(id.into()),
@@ -587,6 +757,39 @@ async fn events_case(id: &str) -> Result<TraceEvent, String> {
                 bus.emit_dynamic(id, &Value::Null)
                     .map_err(|error| error.to_string())?;
                 Ok(json!({"calls": event_calls(&calls)}))
+            }
+            .await;
+            ("emit", finish_event_case(&[&scope], result).await?)
+        }
+        "emit-error-propagation" => {
+            let bus = EventBus::new();
+            let scope = Scope::root();
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let result = async {
+                let failing_calls = Arc::clone(&calls);
+                bus.on_dynamic(&scope, id, EventOptions::default(), move |_| {
+                    failing_calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push("first");
+                    Err(setup_error("listener exploded"))
+                })
+                .map_err(|error| error.to_string())?;
+                let remaining_calls = Arc::clone(&calls);
+                bus.on_dynamic(&scope, id, EventOptions::default(), move |_| {
+                    remaining_calls
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .push("remaining");
+                    Ok(Value::Null)
+                })
+                .map_err(|error| error.to_string())?;
+                let error = match bus.emit_dynamic(id, &Value::Null) {
+                    Err(CoreError::SetupFailed(message)) => message,
+                    Err(error) => return Err(error.to_string()),
+                    Ok(()) => return Err("emit did not propagate its listener failure".into()),
+                };
+                Ok(json!({"calls": event_calls(&calls), "error": error}))
             }
             .await;
             ("emit", finish_event_case(&[&scope], result).await?)

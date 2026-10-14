@@ -38,11 +38,11 @@ bun run oracle/src/index.ts fixtures/conformance/loader-pending-config.json
 
 The first command returns `PASS`; the second currently exits nonzero with `TRACE_MISMATCH`. Keep that difference visible; do not replace the expected trace or report both as passing.
 
-## C1 admission review — 2026-10-14
+## Initial C1 admission review — 2026-10-14 (historical)
 
 The user explicitly approved `pending-config-uses-latest-source`: keep the latest pending configuration, including removed-field semantics. The first-activation difference is now accepted in `intentional-differences.json`; the raw oracle still returns `TRACE_MISMATCH`. The earlier “unaccepted” status above is historical.
 
-**C1 is not yet closed.** Inspecting the actual oracle invalidated the earlier broad claim that all service observations were measured: `late-provider` hardcodes readiness before arrival; `optional-dependency` returns readiness without a consumer; replacement/removal/stale-generation hardcode `oldStale`; `intercept-merge` returns a literal rather than resolved service config. Existing equal output is retained as historical output, not proof of these semantics. Rust `services`, `service_realms`, and `service_races` test those invariants, but cannot stand in for the missing upstream observations.
+**At this review C1 was not yet closed.** Inspecting the actual oracle invalidated the earlier broad claim that all service observations were measured: required/optional readiness, stale references and intercept resolution included constants. This finding led to the real-consumer and watcher work recorded below; historical equal output remains historical, not proof of those contracts.
 
 | Gate | Evidence and remaining action |
 |---|---|
@@ -53,6 +53,24 @@ The user explicitly approved `pending-config-uses-latest-source`: keep the lates
 | G03 watcher/HMR | `HmrDriver` currently exposes invalidation only; injected mock invalidation is not proof of filesystem watcher shutdown or rapid-change reconciliation. Identify and exercise the actual owner path before closing this requirement. Product profile/Legacy JS wiring remains D04, not a reason to add a JS evaluator to Core. |
 
 Atomic file rename is not a combined memory/disk/external-side-effect transaction and was never required to become one. Product D04, C2 Guest languages and release archive validation are separate scope, not additional claims made by C1.
+
+## C1 behavioral acceptance — 2026-10-14
+
+**Core C1 behavior is accepted with two explicitly user-approved differences.** The complete machine-readable traces and fixture hashes are in [`c1-admission-report.json`](../fixtures/conformance/c1-admission-report.json). The frozen source is Harness `47f943859bef60e4160492346772ded9b24f765a`; vendor code was not modified for these probes.
+
+| Gate | Executed evidence |
+|---|---|
+| G01 | Six equal service cases now observe real Cordis consumers, actual Native plugin start/stop callbacks, required/optional readiness, realm visibility and `Service.resolveConfig`. Three separate retained-reference cases observe provider replacement/removal/recovery and actual old-reference operations. |
+| G02 | Twelve lifecycle and twelve event cases agree, including synchronous emit failure: only the first listener runs and `listener exploded` reaches the caller. Rust race/cleanup tests remain additional invariants. |
+| G03 Loader | Ten Loader catalog and five dependency-lifecycle observations agree; the pending-config regression keeps latest-source semantics, rejects a failing candidate, restores committed state and unloads. |
+| G03 files | Real Native `EntryTreeWatcher` and frozen Node 22 HMR/Include scenarios exercise actual file writes, invalid/missing-source preservation, latest valid convergence, atomic recreation, in-flight close and post-close quiescence. Rust additionally verifies bounded/non-regular reads, idle Tokio task progress and Drop cleanup. |
+
+`services.json` has six equal cases; `service-retained-references.json` contains the other three. Rust rejects obsolete handles; upstream retained objects still return old values. The user approved this as `revoked-service-handles-reject-access`, without weakening Rust generation protection. It and `pending-config-uses-latest-source` retain Rust `PASS` / upstream `MISMATCH`. Comparison checks every other trace field for equality; neither exception is a blanket oracle bypass.
+
+Verification: macOS ARM64 Core workspace/all-targets **130 passed**, strict Clippy and oracle TypeScript check passed; Bun **6 passed / 151 assertions**. Both actual CLIs ran from an external working directory: six equal fixtures and two precisely bounded accepted differences. Actual Native file smoke observed `initial → initial (rejected) → latest → latest (missing) → recreated → absent (stopped)`; real frozen HMR returned all convergence/close assertions true. Watcher regression first failed on missing-source handling, then passed after preserving the committed tree.
+
+The watcher owns one continuously driven Tokio worker and uses configurable bounded whole-file polling, not JS/module-cache HMR. Start/stop/Drop join synchronously; async hosts must not block a runtime needed by their plugins. Intermediate writes may coalesce; a persistent latest source is reread after in-flight work. Default source limit is 4 MiB; missing or oversized/non-regular input is an observable error, never an empty configuration. Product D04 wiring, C2 Guest languages and release archives remain separate. Product same-revision consumption is recorded in the product implementation checklist, not inferred from Core tests.
+
 
 ## C1 event catalog evidence — 2026-10-10
 
@@ -114,4 +132,4 @@ The existing runtime-model differences remain accepted: JavaScript `Proxy`/proto
 cargo test -p tessivum-core --test conformance
 ```
 
-The check starts the conformance binary for the six equal fixtures plus the pending-config contract fixture, requires Rust `PASS` and successful exit status, and asserts `executedCases` equals each fixture's declared IDs. It also mutates a Lifecycle fixture to an empty expected trace and requires `INVALID_FIXTURE`. The Bun regression covers the existing lifecycle, service, registration, event, and Loader catalogs. All six equal fixtures were additionally run through both actual CLIs with identical traces; the separate pending-config command above remains an explicit upstream mismatch, not an oracle pass.
+The check starts the conformance binary for six equal fixtures and both approved-difference fixtures, requires Rust `PASS`, and asserts every declared case executed. Empty baselines still fail. Bun tests assert each equal observation, corrupted-baseline rejection, and the exact three upstream retained-reference differences. Raw pending-config and retained-reference oracle commands deliberately remain nonzero `MISMATCH`; the difference ledger does not change runner exit semantics.

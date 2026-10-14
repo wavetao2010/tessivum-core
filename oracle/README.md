@@ -20,9 +20,9 @@ cargo run -p tessivum-core --bin conformance -- fixtures/conformance/<fixture>.j
 
 `loader-dependencies.json` runs real upstream Loader plugins and Rust Native plugins through waiting, provider arrival, removal, restoration, and unload. `loader.json` runs real upstream Loader/Group/Include cases against Rust's public Loader API: dependencies, duplicate IDs, ordered patches, config updates, replacement, candidate and rollback failures, nested groups, later patch targeting, and atomic persistence. Both compare normalized observations at settled boundaries.
 
-`loader-pending-config.json` separately probes config replacement while dependencies are missing, late activation, failed candidate rollback, recovery, and unload. It requires the latest config and removal of obsolete fields. Rust passes; the frozen upstream returns `TRACE_MISMATCH` on first activation (old config survives). Latest-config semantics were explicitly approved on 2026-10-14 as `pending-config-uses-latest-source`; raw output is not relabeled PASS. See `../docs/CONFORMANCE_REPORT.md` for remaining C1 gates, including unmeasured constants in the historical service oracle.
+`loader-pending-config.json` requires the latest pending source and removal of obsolete fields. Rust passes; frozen upstream returns `TRACE_MISMATCH` on first activation. `service-retained-references.json` measures three replacement/removal/recovery cases: Rust rejects obsolete handles, whereas old upstream references still return old values. Both differences were explicitly approved on 2026-10-14; raw output and nonzero oracle exits remain unchanged. `services.json` contains six equal real-consumer/realm/intercept cases. See `../docs/CONFORMANCE_REPORT.md` and `../fixtures/conformance/c1-admission-report.json` for complete C1 evidence.
 
-`events.json` executes all 11 declared cases on both sides: emit order, parallel error aggregation, serial/synchronous bail, waterfall next/veto/wrapping, prepend, scoped filtering, self-removal, and owner disposal during dispatch. Each case emits one `event-dispatched` observation with its case ID, mode, and actual calls/results. Only parallel completion labels are sorted; ordered callbacks and dispatch snapshots retain their order. Empty, malformed, or unknown cases are errors. Run the ignored-case regression with `bun test oracle/src/scenarios.test.ts` from the Core root.
+`events.json` executes all 12 declared cases on both sides, including synchronous emit-error propagation and stopping remaining listeners. Each case emits one `event-dispatched` observation with its case ID, mode, and actual calls/results. Only parallel completion labels are sorted; ordered callbacks and dispatch snapshots retain their order. Empty, malformed, or unknown cases are errors. Run behavioral and mismatch-boundary regressions with `bun test oracle/src/scenarios.test.ts` from the Core root.
 
 Source resolution is relative to this module by default (`../upstream/deepseek-harness/vendor` from the Core root), not to the working directory. For another checkout location, set `CORDIS_VENDOR_ROOT` to the pinned Harness `vendor` directory (or its `cordis` child). Loader sources are read from the sibling `loader` directory. Install the upstream workspace dependencies first; the override selects a checkout, it does not verify its revision.
 
@@ -34,8 +34,8 @@ The event vocabulary is fixed: `fiber-created`, `fiber-state-changed`, `service-
 
 ## Baseline
 
-- Cordis: `47f943859bef60e4160492346772ded9b24f765a`
-- DeepSeek Harness: `8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4`
+- Standalone Cordis reference: `8cc9e33fab69e2d0476d126baaf2acb24e6a6ab4`
+- DeepSeek Harness (actual C1 oracle vendor owner): `47f943859bef60e4160492346772ded9b24f765a`
 - Harness vendored Cordis: `56b3d4f725681cf4556c1a8695a709cc3b6eed74`
 
 M0 keeps lifecycle behavior equal to that baseline. It deliberately does not copy JavaScript Proxy/prototype behavior and does not evaluate arbitrary `!!js`; future configuration uses safe expressions, with legacy JavaScript delegated to the Legacy Node Loader.

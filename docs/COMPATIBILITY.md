@@ -71,6 +71,29 @@ compat-host from that same revision.
 Custom conformance inputs using `event/emit` must use `event/event-catalog` and
 its explicit case list; this fixture change does not rename production event APIs.
 
+## File-backed Loader ownership
+
+`EntryTreeWatcher::start(loader, path, EntryTreeWatcherOptions::default())`
+transfers a Loader into an owned worker and waits for the initial refresh.
+Inspect `snapshot()` for the committed tree, update/rejection counters, the most
+recent error (retained across later successes), and running state; `context()`
+returns its current committed context. Initial parse/activation failure is
+observable in the snapshot and later file changes can recover.
+
+Polling defaults to 100 ms and a 4 MiB source limit; both are configurable and
+must be positive. Only regular UTF-8 JSON/YAML sources are accepted. Atomic
+rename and delete/recreate are observed by path; unreadable/missing files retain
+the committed tree. Write an empty tree to explicitly unload entries. Polling
+may coalesce transient intermediate writes, but rereads the latest source after
+each serialized transaction. No JS or module-cache execution is added.
+
+`stop()` wakes and joins the worker, waits for in-flight work and unloads the
+tree; repeated calls return the same cleanup result. Drop also joins (cleanup
+errors cannot be returned from Drop). These are blocking APIs: use
+`spawn_blocking` from async hosts when plugins need the caller runtime to
+progress. The existing `HmrDriver` interface remains a separate package-cache
+invalidation boundary, not proof of a filesystem watcher.
+
 ## WASM ABI policy
 
 `PluginManifest.abi` must equal `cordis.plugin/v1`. Manifest validation happens

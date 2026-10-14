@@ -13,8 +13,11 @@ independently of crate/repository releases.
 - Preserve fresh factory dependency declarations during transactional updates, augmenting only the required dependencies used by retained service expressions.
 - Wait for queued dependency snapshots to settle before returning Native activation results; do not report a previous generation's success/failure during reconfiguration.
 - Make repeated Native `activation()` observation idempotent: it no longer requeues an already failed start and hangs Loader rollback. Dependency notifications still schedule reconfiguration. A failing-before/passing-after regression preserves the original error and verifies provisional service cleanup.
-- Add the real Native/upstream `loader-pending-config.json` scenario for pending config replacement, late provider arrival, rejected candidate rollback, recovery, and unload. On 2026-10-14 the user approved latest-config semantics; the raw upstream `MISMATCH` remains visible under `pending-config-uses-latest-source`. This does not close the other C1 gates.
-- Correct the C1 evidence boundary: several existing TS service-catalog observations are hardcoded, synchronous emit-error comparison is missing, and injected HMR invalidation does not establish real file-watcher cleanup. Historical equal output is not proof of those contracts; see the conformance report.
+- Add the real Native/upstream `loader-pending-config.json` scenario. The user approved latest pending-source semantics on 2026-10-14; raw upstream `MISMATCH` remains visible under `pending-config-uses-latest-source`.
+- Replace service-oracle constants with real consumers, Native lifecycle callbacks, retained-reference operations and resolved service intercepts. Preserve Rust generation safety under the explicitly approved `revoked-service-handles-reject-access` difference; its dedicated fixture keeps the upstream mismatch visible.
+- Add synchronous emit-error propagation to both event catalogs: remaining listeners do not run after the first error.
+- Add `EntryTreeWatcher`, a real bounded JSON/YAML file owner using serialized Loader transactions, configurable polling and joined shutdown/Drop. Missing, invalid, oversized and non-regular sources retain committed state and expose errors; plugin tasks continue running while files are unchanged. Keep the independent public `HmrDriver` package-invalidation boundary.
+- Complete Core C1 behavioral acceptance: 130 Rust tests, strict Clippy, six Bun tests, TypeScript, actual dual-runner traces and real Native/frozen-HMR filesystem scenarios. See `docs/CONFORMANCE_REPORT.md` and the C1 machine-readable report; this is not C2, product D04 or release-archive acceptance.
 
 ## 0.2.0 — 2026-10-13
 
