@@ -606,7 +606,7 @@ async function loaderDependencies(root: Context, input: Input): Promise<TraceEve
   }
 }
 
-const loaderCatalogCases = ['unordered-dependencies', 'duplicate-id', 'add-update-remove-move', 'config-only-update', 'plugin-replacement', 'candidate-failure', 'rollback-failure', 'nested-group', 'patch-insertion-later-targeting', 'atomic-write'] as const
+const loaderCatalogCases = ['unordered-dependencies', 'duplicate-id', 'add-update-remove-move', 'config-only-update', 'pending-config-rollback', 'plugin-replacement', 'candidate-failure', 'rollback-failure', 'nested-group', 'patch-insertion-later-targeting', 'atomic-write'] as const
 type LoaderCatalogCase = typeof loaderCatalogCases[number]
 
 function loaderCatalogCaseIds(input: Input): LoaderCatalogCase[] {
@@ -648,6 +648,39 @@ async function loaderCatalogCase(root: Context, id: LoaderCatalogCase): Promise<
       await root.loader.create(entry('config'))
       await root.loader.update('config', { config: { revision: 2 } })
       return root.loader.resolve('config').options.config
+    case 'pending-config-rollback': {
+      let starts = 0
+      root.loader.builtins['catalog/configured'] = {
+        name: 'configured', inject: ['dependency'],
+        apply(ctx: Context, config: { label: string }) {
+          if (config.label === 'reject') throw new Error('rejected config')
+          starts++
+          ctx.provide('result', config)
+        },
+      }
+      const source = { label: { __jsExpr: 'dependency.latest' } }
+      const observations: unknown[] = []
+      const observe = async () => {
+        await root.loader.await()
+        observations.push(root.get('result') ?? null)
+      }
+      await root.loader.create(entry('config', 'cordis:catalog/configured', { label: { __jsExpr: 'dependency.old' }, obsolete: true }))
+      await observe()
+      await root.loader.update('config', { config: source })
+      await observe()
+      const startsWhilePending = starts
+      await root.loader.create(entry('provider', 'cordis:catalog/provider', { old: 'stale', latest: 'ready' }))
+      await observe()
+      let rejected = false
+      try { await root.loader.update('config', { config: { label: 'reject' } }) } catch { rejected = true }
+      await observe()
+      const sourcePreserved = JSON.stringify(root.loader.resolve('config').options.config) === JSON.stringify(source)
+      await root.loader.update('config', { config: { label: { __jsExpr: 'dependency.old' } } })
+      await observe()
+      await root.fiber.dispose()
+      observations.push(root.get('result') ?? null)
+      return { observations, startsWhilePending, rejected, sourcePreserved }
+    }
     case 'plugin-replacement':
       await root.loader.root.update([entry('old')])
       await root.loader.root.update([entry('replacement')])

@@ -16,6 +16,18 @@
   },
   "differences": [
     {
+      "id": "pending-config-uses-latest-source",
+      "status": "accepted",
+      "approvedOn": "2026-10-14",
+      "kind": "configuration-lifecycle",
+      "sourceRevision": "47f943859bef60e4160492346772ded9b24f765a",
+      "sourceBehavior": "First activation after a pending config update uses the old expression and retains a removed field.",
+      "tessivumBehavior": "First activation resolves the latest committed source configuration; whole-config replacement removes obsolete fields.",
+      "rationale": "User explicitly approved latest-config semantics instead of reproducing stale upstream configuration.",
+      "fixture": "loader-pending-config.json",
+      "conformanceImpact": "Rust PASS and upstream TRACE_MISMATCH remain visible. This approval covers only the first-activation pending-config difference, not other C1 gaps."
+    },
+    {
       "id": "no-javascript-proxy-or-prototype",
       "status": "accepted",
       "kind": "runtime-model",

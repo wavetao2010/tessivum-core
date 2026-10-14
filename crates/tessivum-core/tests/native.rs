@@ -1196,6 +1196,45 @@ async fn native_loader_hooks_run_inside_a_tokio_runtime() {
 }
 
 #[tokio::test]
+async fn repeated_activation_reports_the_original_failure_without_hanging() {
+    let root = ContextHandle::root();
+    let mut runtime = NativePluginRuntime::new();
+    runtime
+        .register("failing", || FailingPlugin { replacing: false })
+        .unwrap();
+    let mut handle = runtime
+        .instantiate(
+            ResolvedPackage {
+                specifier: "failing".into(),
+                location: "failing".into(),
+            },
+            entry("failing", "failing", Value::Null),
+            root.clone(),
+        )
+        .await
+        .unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), handle.activation())
+        .await
+        .expect("initial failure settles")
+        .unwrap_err()
+        .to_string();
+    let repeated = tokio::time::timeout(Duration::from_secs(2), handle.activation()).await;
+    handle.dispose().await.unwrap();
+    assert!(root
+        .get::<u8>(&ServiceKey::new("failing.service", "native/v1"))
+        .unwrap()
+        .is_none());
+    root.scope().dispose().await.unwrap();
+    assert_eq!(
+        repeated
+            .expect("repeated activation must not hang")
+            .unwrap_err()
+            .to_string(),
+        first
+    );
+}
+
+#[tokio::test]
 async fn managed_runtime_builder_failure_does_not_register_dependency_watcher() {
     let callbacks = Arc::new(AtomicUsize::new(0));
     let mut runtime = NativePluginRuntime::with_runtime_builder_observer(

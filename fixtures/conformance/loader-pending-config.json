@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "tessivum.conformance/v1",
+  "name": "loader.pending-config-rollback",
+  "domain": "loader",
+  "scenario": "loader-catalog",
+  "input": {
+    "cases": [
+      {"id": "pending-config-rollback", "operations": ["load-pending", "update-config", "add-provider", "reject-config", "recover", "unload"]}
+    ]
+  },
+  "expectedTrace": [
+    {"event": "config-committed", "subject": "pending-config-rollback", "phase": "catalog", "value": {"observations": [null, null, {"label": "ready"}, {"label": "ready"}, {"label": "stale"}, null], "startsWhilePending": 0, "rejected": true, "sourcePreserved": true}}
+  ]
+}

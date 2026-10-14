@@ -1202,8 +1202,12 @@ impl ManagedControl {
                 .state
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            state.activated = true;
-            state.dirty = true;
+            // Re-observing activation must not restart a failed instance. Only
+            // the first request or a dependency notification schedules work.
+            if !state.activated {
+                state.activated = true;
+                state.dirty = true;
+            }
             state.waker.take()
         };
         self.changed.notify_all();

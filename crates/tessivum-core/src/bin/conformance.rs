@@ -3,7 +3,10 @@ use std::{
     env, fs,
     future::Future,
     process::ExitCode,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
     task::{Context, Poll, Waker},
 };
 
@@ -1173,6 +1176,9 @@ fn expect_loader_failure<T>(
 }
 
 async fn loader_case(id: &str) -> Result<Value, String> {
+    if id == "pending-config-rollback" {
+        return pending_config_rollback().await;
+    }
     let state = Arc::new(LoaderCatalogState::default());
     let mut loader = catalog_loader(Arc::clone(&state))?;
     let observation = match id {
@@ -1464,6 +1470,106 @@ impl NativePlugin for DependencyPlugin {
         // Services are owned and removed by the native plugin scope.
         Box::pin(async { Ok(()) })
     }
+}
+
+struct ConfiguredPlugin {
+    starts: Arc<AtomicUsize>,
+}
+
+impl NativePlugin for ConfiguredPlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "configured".into(),
+            version: "1".into(),
+            dependencies: vec![Dependency::Required(ServiceKey::new(
+                "dependency",
+                "catalog/v1",
+            ))],
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        context: ContextHandle,
+        config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async move {
+            if config["label"] == "reject" {
+                return Err(setup_error("rejected config").into());
+            }
+            self.starts.fetch_add(1, Ordering::SeqCst);
+            context.provide(ServiceKey::new("result", "catalog/v1"), config.clone())?;
+            Ok(())
+        })
+    }
+
+    fn update<'a>(&'a mut self, _: ContextHandle, _: &'a Value) -> NativePluginFuture<'a> {
+        Box::pin(async { Err(setup_error("Loader replaces this probe instance").into()) })
+    }
+
+    fn stop<'a>(&'a mut self, _: ContextHandle) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+async fn pending_config_rollback() -> Result<Value, String> {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let mut runtime = NativePluginRuntime::new();
+    let counter = Arc::clone(&starts);
+    runtime
+        .register("catalog/config", move || ConfiguredPlugin {
+            starts: Arc::clone(&counter),
+        })
+        .map_err(|error| error.to_string())?;
+    runtime
+        .register("catalog/provider", || DependencyPlugin { consumer: false })
+        .map_err(|error| error.to_string())?;
+    let mut loader = Loader::try_new(
+        Arc::new(CatalogResolver),
+        [Arc::new(runtime) as Arc<dyn LoaderRuntime>],
+    )
+    .map_err(|error| error.to_string())?;
+    let root = loader.context();
+    let observe = || -> Result<Value, String> {
+        root.get::<Value>(&ServiceKey::new("result", "catalog/v1"))
+            .and_then(|handle| handle.map(|handle| handle.with(Clone::clone)).transpose())
+            .map(|value| value.unwrap_or(Value::Null))
+            .map_err(|error| error.to_string())
+    };
+    let result = async {
+        let mut tree = catalog_tree(&["config"])?;
+        tree.entries[0].options.config = json!({"label":{"$expr":"service.dependency.old"}, "obsolete":true});
+        loader.load(tree).await.map_err(|error| error.to_string())?;
+        let mut observations = vec![observe()?];
+        let source = json!({"label":{"$expr":"service.dependency.latest"}});
+        let id = EntryId::new("config").map_err(|error| error.to_string())?;
+        loader.update(&[Patch::UpdateConfig { id: id.clone(), config: source.clone() }])
+            .await.map_err(|error| error.to_string())?;
+        observations.push(observe()?);
+        let starts_while_pending = starts.load(Ordering::SeqCst);
+        let mut provider = catalog_entry("provider")?;
+        provider.options.config = json!({"old":"stale", "latest":"ready"});
+        loader.update(&[Patch::Insert { entry: provider, before: None }])
+            .await.map_err(|error| error.to_string())?;
+        observations.push(observe()?);
+        let rejected = loader.update(&[Patch::UpdateConfig { id: id.clone(), config: json!({"label":"reject"}) }]).await.is_err();
+        observations.push(observe()?);
+        let source_preserved = loader.tree().entries[0].options.config == source;
+        loader.update(&[Patch::UpdateConfig { id, config: json!({"label":{"$expr":"service.dependency.old"}}) }])
+            .await.map_err(|error| error.to_string())?;
+        observations.push(observe()?);
+        loader.unload().await.map_err(|error| error.to_string())?;
+        observations.push(observe()?);
+        Ok(json!({"observations":observations, "startsWhilePending":starts_while_pending, "rejected":rejected, "sourcePreserved":source_preserved}))
+    }.await;
+    let cleanup = loader.unload().await;
+    root.scope()
+        .dispose()
+        .await
+        .map_err(|error| error.to_string())?;
+    cleanup.map_err(|error| error.to_string())?;
+    result
 }
 
 async fn loader_dependencies(fixture: &Fixture) -> Result<Vec<TraceEvent>, String> {

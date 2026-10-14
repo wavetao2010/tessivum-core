@@ -12,6 +12,9 @@ independently of crate/repository releases.
 - Add `LoaderRuntime::instantiate_configured` for source configuration import. Eager runtimes still resolve before construction; direct `NativePluginRuntime::instantiate` also accepts source expressions using the default scope. `NativePluginInstance::instantiate` remains the resolved-value primitive. Persisted entries keep their expressions, and arbitrary typed services are not implicitly serialized.
 - Preserve fresh factory dependency declarations during transactional updates, augmenting only the required dependencies used by retained service expressions.
 - Wait for queued dependency snapshots to settle before returning Native activation results; do not report a previous generation's success/failure during reconfiguration.
+- Make repeated Native `activation()` observation idempotent: it no longer requeues an already failed start and hangs Loader rollback. Dependency notifications still schedule reconfiguration. A failing-before/passing-after regression preserves the original error and verifies provisional service cleanup.
+- Add the real Native/upstream `loader-pending-config.json` scenario for pending config replacement, late provider arrival, rejected candidate rollback, recovery, and unload. On 2026-10-14 the user approved latest-config semantics; the raw upstream `MISMATCH` remains visible under `pending-config-uses-latest-source`. This does not close the other C1 gates.
+- Correct the C1 evidence boundary: several existing TS service-catalog observations are hardcoded, synchronous emit-error comparison is missing, and injected HMR invalidation does not establish real file-watcher cleanup. Historical equal output is not proof of those contracts; see the conformance report.
 
 ## 0.2.0 — 2026-10-13
 

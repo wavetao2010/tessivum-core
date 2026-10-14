@@ -20,6 +20,40 @@ Runtime source matches candidate `e8283fb7767e4abb7d1c92afa86e7578f6f4e77b`;
 the release finalization changes documentation only. The original differential
 report linked above remains historical evidence, not the current fixture hashes.
 
+## Pending configuration and rollback — 2026-10-13
+
+- Candidate: local changes on Core `b69d0ed86f30adb0b2d6138d458593487336aa08`; no new release. Product `2bc3257546121b7348fdef3a7b6dfdacd6c4e4b0` remains pinned to that unpatched Git revision. Product smoke used an isolated temporary Cargo patch for Core/Extism/Node Bridge; its manifest and lock were not changed.
+- Added `fixtures/conformance/loader-pending-config.json`, separate from the six equal fixtures. Both runners execute real plugins: load without a provider, replace the entire config while pending, add the provider, reject a candidate, recover, and unload. No plugin starts before readiness; the failed candidate retains the committed source expression.
+- Rust observations: `null → null → {label: ready} → {label: ready} → {label: stale} → null`. Frozen Harness `47f943859bef60e4160492346772ded9b24f765a` produces `{label: stale, obsolete: true}` at the first activation instead; the remaining observations match. `git diff -- vendor` was empty and `CORDIS_VENDOR_ROOT` unset. This is **MISMATCH**, not an accepted difference or a full C1/G03 pass. The expected latest-config contract was not changed to match stale upstream behavior.
+- The native scenario initially hung during rejected-candidate rollback. A deterministic regression showed that a second `activation()` call requeued a failed instance, leaving it Pending despite ready dependencies. Only the first activation request now schedules work; subsequent calls observe the settled result or queued dependency updates.
+- Verification on macOS ARM64: Core workspace/all-targets **129 passed**, strict Clippy passed; existing Bun oracle **5 passed / 151 assertions**, TypeScript check passed; actual Native scenario **100/100** runs within a five-second per-run deadline. Actual product Composition missing-dependency admission, provider replacement/removal/restoration, source-expression preservation, and stop passed with the temporary patch.
+- Local evidence: product `test-artifacts/c1-pending-config/` contains both complete traces, the failing regression, successful test/Clippy and product logs, reference and candidate hashes, and stress results. No Windows/Browser acceptance or formal Git-pin upgrade was performed for this local patch.
+
+Reproduce from Core root:
+
+```sh
+cargo run --locked -p tessivum-core --bin conformance -- fixtures/conformance/loader-pending-config.json
+bun run oracle/src/index.ts fixtures/conformance/loader-pending-config.json
+```
+
+The first command returns `PASS`; the second currently exits nonzero with `TRACE_MISMATCH`. Keep that difference visible; do not replace the expected trace or report both as passing.
+
+## C1 admission review — 2026-10-14
+
+The user explicitly approved `pending-config-uses-latest-source`: keep the latest pending configuration, including removed-field semantics. The first-activation difference is now accepted in `intentional-differences.json`; the raw oracle still returns `TRACE_MISMATCH`. The earlier “unaccepted” status above is historical.
+
+**C1 is not yet closed.** Inspecting the actual oracle invalidated the earlier broad claim that all service observations were measured: `late-provider` hardcodes readiness before arrival; `optional-dependency` returns readiness without a consumer; replacement/removal/stale-generation hardcode `oldStale`; `intercept-merge` returns a literal rather than resolved service config. Existing equal output is retained as historical output, not proof of these semantics. Rust `services`, `service_realms`, and `service_races` test those invariants, but cannot stand in for the missing upstream observations.
+
+| Gate | Evidence and remaining action |
+|---|---|
+| G01 service lifecycle | Replace the above oracle constants with real required/optional consumers, stale-reference operations and service intercept resolution; expose any resulting mismatch rather than changing the contract to obtain PASS. |
+| G02 lifecycle | Real lifecycle catalog covers the declared startup/disposal minimum; Rust race and cleanup tests add independent invariants. |
+| G02 event errors | Existing catalog covers ordering, short-circuit, parallel aggregation and removal. Add real synchronous emit-error propagation comparison; Rust `events.rs` already checks stop-on-error. |
+| G03 Loader | Ordered patches, whole-config replacement, failed candidates/restoration errors and atomic file replacement have concrete coverage. Pending-config difference is approved. Live JSON projection evidence is Native-specific, not arbitrary typed-service or JS equivalence. |
+| G03 watcher/HMR | `HmrDriver` currently exposes invalidation only; injected mock invalidation is not proof of filesystem watcher shutdown or rapid-change reconciliation. Identify and exercise the actual owner path before closing this requirement. Product profile/Legacy JS wiring remains D04, not a reason to add a JS evaluator to Core. |
+
+Atomic file rename is not a combined memory/disk/external-side-effect transaction and was never required to become one. Product D04, C2 Guest languages and release archive validation are separate scope, not additional claims made by C1.
+
 ## C1 event catalog evidence — 2026-10-10
 
 - Fixture: `fixtures/conformance/events.json`, SHA-256 `d720344784628ae2d4062fb1fce2914661765a3697b56ff210fd8fa84d217e41`.
@@ -80,4 +114,4 @@ The existing runtime-model differences remain accepted: JavaScript `Proxy`/proto
 cargo test -p tessivum-core --test conformance
 ```
 
-The check starts the conformance binary for all six fixtures, requires `PASS` and successful exit status, and asserts `executedCases` equals each fixture's declared IDs. It also mutates a Lifecycle fixture to an empty expected trace and requires `INVALID_FIXTURE`. The Bun regression executes lifecycle, service, event, and Loader catalog cases independently, rejects changed observations, and rejects invalid case lists.
+The check starts the conformance binary for the six equal fixtures plus the pending-config contract fixture, requires Rust `PASS` and successful exit status, and asserts `executedCases` equals each fixture's declared IDs. It also mutates a Lifecycle fixture to an empty expected trace and requires `INVALID_FIXTURE`. The Bun regression covers the existing lifecycle, service, registration, event, and Loader catalogs. All six equal fixtures were additionally run through both actual CLIs with identical traces; the separate pending-config command above remains an explicit upstream mismatch, not an oracle pass.

@@ -17,6 +17,7 @@ fn full_catalog_executes_every_declared_case() {
         "events.json",
         "loader.json",
         "loader-dependencies.json",
+        "loader-pending-config.json",
         "service-registration.json",
     ] {
         let fixture_document: Value = serde_json::from_slice(
