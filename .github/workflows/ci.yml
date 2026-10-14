@@ -114,3 +114,80 @@ jobs:
           TESSIVUM_GUEST_LANGUAGE: typescript
           TESSIVUM_WASM_GUEST: ${{ github.workspace }}/examples/wasm-typescript/dist/plugin.wasm
         run: cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture
+
+  go-wasm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - name: Install checksum-pinned Go guest toolchain
+        run: |
+          mkdir -p "$RUNNER_TEMP/w3-tools"
+          cd "$RUNNER_TEMP/w3-tools"
+          curl -fL --retry 3 https://go.dev/dl/go1.26.9.linux-amd64.tar.gz -o go.tar.gz
+          echo '42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d  go.tar.gz' | sha256sum --check -
+          tar -xzf go.tar.gz
+          curl -fL --retry 3 https://github.com/tinygo-org/tinygo/releases/download/v0.43.0/tinygo0.43.0.linux-amd64.tar.gz -o tinygo.tar.gz
+          echo 'ca9fc6d055e3889462dea4450a2e42a92242d88b5c362a7ec39bdb563413d78a  tinygo.tar.gz' | sha256sum --check -
+          tar -xzf tinygo.tar.gz
+          curl -fL --retry 3 https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz -o binaryen.tar.gz
+          echo '2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  binaryen.tar.gz' | sha256sum --check -
+          tar -xzf binaryen.tar.gz
+          echo "$RUNNER_TEMP/w3-tools/go/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/w3-tools/tinygo/bin" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/w3-tools/binaryen-version_133/bin" >> "$GITHUB_PATH"
+      - name: Compile actual Go guest
+        working-directory: examples/wasm-go
+        run: |
+          go mod download
+          sh build.sh
+          sha256sum dist/plugin.wasm
+      - name: Verify same ABI and security matrix
+        env:
+          TESSIVUM_GUEST_LANGUAGE: go
+          TESSIVUM_WASM_GUEST: ${{ github.workspace }}/examples/wasm-go/dist/plugin.wasm
+        run: cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture
+
+  python-wasm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 26.5.0
+      - name: Install checksum-pinned Python guest toolchain
+        run: |
+          mkdir -p "$RUNNER_TEMP/w3-tools"
+          cd "$RUNNER_TEMP/w3-tools"
+          curl -fL --retry 3 https://github.com/micropython/micropython/archive/refs/tags/v1.26.1.tar.gz -o micropython.tar.gz
+          echo '10600e844f02a8b448cf176df71031d2eb3d731097a809a963ce9c35cef3d613  micropython.tar.gz' | sha256sum --check -
+          tar -xzf micropython.tar.gz
+          curl -fL --retry 3 https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz -o wasi-sdk.tar.gz
+          echo 'b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4  wasi-sdk.tar.gz' | sha256sum --check -
+          tar -xzf wasi-sdk.tar.gz
+          curl -fL --retry 3 https://files.pythonhosted.org/packages/d1/a8/4cf9aceeb5ce75f305004a4aec26809678b8b0c7037402e7d715c9dfb686/mpy_cross-1.26.1.post2-py2.py3-none-manylinux1_x86_64.whl -o mpy_cross-1.26.1.post2-py2.py3-none-manylinux1_x86_64.whl
+          echo 'a21322a88412bff215daab2720d71de419792ff203501f4a1ed1b6a5e6e8d83e  mpy_cross-1.26.1.post2-py2.py3-none-manylinux1_x86_64.whl' | sha256sum --check -
+          python3 -m venv mpy-cross
+          mpy-cross/bin/python -m pip install --no-deps ./mpy_cross-1.26.1.post2-py2.py3-none-manylinux1_x86_64.whl
+          curl -fL --retry 3 https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz -o binaryen.tar.gz
+          echo '2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  binaryen.tar.gz' | sha256sum --check -
+          tar -xzf binaryen.tar.gz
+          echo "MICROPYTHON_DIR=$RUNNER_TEMP/w3-tools/micropython-1.26.1" >> "$GITHUB_ENV"
+          echo "WASI_SDK_PATH=$RUNNER_TEMP/w3-tools/wasi-sdk-34.0-x86_64-linux" >> "$GITHUB_ENV"
+          echo "MPY_CROSS=$RUNNER_TEMP/w3-tools/mpy-cross/bin/mpy-cross" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/w3-tools/binaryen-version_133/bin" >> "$GITHUB_PATH"
+      - name: Compile actual Python guest
+        working-directory: examples/wasm-python
+        run: |
+          node build.mjs
+          cat dist/plugin.wasm.sha256
+      - name: Verify all six shared ABI and security checks
+        env:
+          TESSIVUM_GUEST_LANGUAGE: python
+          TESSIVUM_WASM_GUEST: ${{ github.workspace }}/examples/wasm-python/dist/plugin.wasm
+        run: cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture

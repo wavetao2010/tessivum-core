@@ -218,3 +218,64 @@ Local full logs and the accepted artifact are retained in product
 `test-artifacts/w2-complete/`. Product same-candidate consumption is recorded in
 its scope checklist. Go/Python, product profiles and release-platform archives
 remain outside W2 acceptance.
+
+## W3 Go guest acceptance — 2026-10-14
+
+On macOS ARM64, Go 1.26.9, TinyGo 0.43.0, go-pdk 1.1.3 and Binaryen 133
+produced a 308,147-byte guest with SHA-256
+`d9fa8934c265e64a15a3f5bab899e8eaf6f8eb03bacb737778a7ca8b22cdc42b`.
+All six shared real-guest checks passed, including the new case-variant and null
+request-ID rejection cases. The previous struct decoder accepted `RequestId`;
+that regression failed before exact-key decoding and passed afterward.
+Rust and TypeScript artifacts also passed all six expanded checks.
+
+The real Native/Extism/Legacy runtime smoke passed. Go's memory probe uses a
+real PDK linear-memory allocation with page writes and explicit release; the
+same 16 MiB request succeeds under defaults and fails at 128 pages. A Go slice
+of that size exhausted the unchanged fuel budget while marking GC metadata,
+even after bulk-memory lowering; that compiler route was not retained.
+No WASI imports or network grants were added. Commands are documented in
+[`PROTOCOLS.md`](PROTOCOLS.md#building-the-go-guest). Python and final product
+same-candidate acceptance are separate and are not implied by these Go results.
+
+## W3 Python guest acceptance — 2026-10-14
+
+On macOS ARM64, MicroPython 1.26.1 with mpy-cross 1.26.1.post2, WASI SDK 34.0
+and Binaryen 133 produced a 223,400-byte artifact with SHA-256
+`c57a9f24191596eab8ae7971f7d0c430138b3f30e9ff65b7f54e19fb25adebd4`.
+All six shared real-guest checks passed explicitly, followed by the actual
+Native/Python-Extism/Legacy runtime smoke. Rust, TypeScript and Go also passed
+all six checks with the exception-enabled engine; Host defaults and the original
+resource-limit probes remain unchanged, with no sandbox permission added.
+
+The accepted implementation embeds upstream MicroPython and executes compiled
+Python bytecode. Runtime source compilation exceeded the default fuel budget;
+the retained build compiles ahead of time instead. SDK legacy exception
+instructions were translated to standardized exnref instructions and the existing
+Extism exception feature enabled. Sustained execution initially trapped with
+out-of-bounds memory because conservative GC could not see WASM local roots.
+Binaryen `--spill-pointers` fixes that path, and the same timeout/cancellation
+matrix now passes. The SDK's implicit wasm-opt step is disabled so stack names
+remain available until explicit root spilling and final stripping.
+
+Review regressions first reproduced reuse after interruption and invalid UTF-8
+from a valid escaped surrogate pair. A shared export-entry latch now makes hard
+Python failures terminal: later exports trap without re-entering the damaged VM;
+stop still drops the instance and invalidates authority. Paired surrogate escapes
+are normalized, lone surrogates rejected, and escaped literal backslashes preserved.
+The matrix covers trap/fuel/timeout/cancel followed by call and stop, plus Unicode
+round trips. An additional live-object `gc.collect()` workload and subsequent
+event/update/stop pass with an explicit 100,000,000 fuel budget; it exceeded the
+default 10,000,000 budget. This extra GC-safety check does not replace or relax
+the original default-budget lifecycle/memory/output and reduced-fuel probes.
+
+The real 16 MiB allocation/page-write/free probe uses Extism-owned memory;
+it succeeds under defaults and fails at 128 pages. The separate 768 KiB
+interpreter heap does not promise large Python bytearrays within the fuel budget.
+Files, clock calls, external imports and stdout are unavailable. This is
+MicroPython support, not arbitrary CPython/pip/C-extension compatibility.
+Toolchain hashes and commands are in
+[`PROTOCOLS.md`](PROTOCOLS.md#building-the-python-guest) and the example lock file.
+Failed builds and runtime diagnostics are retained in product
+`test-artifacts/w3-complete/`; they are not supported alternate build routes.
+Product same-candidate acceptance is recorded separately in its scope checklist.

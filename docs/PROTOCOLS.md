@@ -149,9 +149,84 @@ Run the matrix on that exact artifact; type-checking or a prior artifact hash
 does not certify a rebuilt guest.
 
 Select `TESSIVUM_GUEST_LANGUAGE=rust` (the default) for the existing Rust artifact.
-TypeScript requires an explicit artifact path; missing artifacts and invalid
+Other languages require an explicit artifact path; missing artifacts and invalid
 language names fail rather than silently skipping the ignored matrix.
 
+### Building the Go guest
+
+`examples/wasm-go` pins `go-pdk` 1.1.3 in `go.mod`/`go.sum`. Install Go 1.26.9,
+[TinyGo 0.43.0](https://github.com/tinygo-org/tinygo/releases/tag/v0.43.0), and
+Binaryen 133, then run from Core root:
+
+```sh
+(cd examples/wasm-go && go mod download && sh build.sh)
+TESSIVUM_GUEST_LANGUAGE=go \
+TESSIVUM_WASM_GUEST="$PWD/examples/wasm-go/dist/plugin.wasm" \
+  cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture
+TESSIVUM_WASM_GUEST="$PWD/examples/wasm-go/dist/plugin.wasm" \
+  cargo run --locked -p tessivum-runtime-smoke
+```
+
+The official `wasm-unknown` target avoids WASI runtime initialization; the guest
+keeps conservative GC and disables the scheduler. Its explicit clock probe is
+linked to the existing trap-only module. The artifact retains eight exact dotted
+Host imports and five lifecycle exports; Host WASI/network policy is unchanged.
+This is TinyGo-compatible Go, not a guarantee that arbitrary Go packages work.
+
+The memory-limit operation allocates a real Extism PDK linear-memory buffer,
+writes each page, and frees it. TinyGo's large Go-slice GC metadata loop exhausted
+the unchanged fuel budget even with native bulk-memory clearing; no custom GC,
+larger fuel allowance, or synthetic allocation result is used. This probe covers
+Extism buffer limits, not a claim that a 16 MiB Go slice fits the fuel budget.
+The shared matrix also rejects case-variant envelope fields and null request IDs.
+
+
+### Building the Python guest
+
+`examples/wasm-python/toolchain.lock.json` pins MicroPython 1.26.1 source,
+WASI SDK 34.0, Binaryen 133 and mpy-cross 1.26.1.post2 compiler wheels with
+archive hashes; the build uses Node.js 26.5.0. Extract the source/SDK and install the verified platform wheel
+(`python3 -m pip install --no-deps <verified-wheel>`), then run from Core root:
+
+```sh
+export MICROPYTHON_DIR=/absolute/path/to/micropython-1.26.1
+export WASI_SDK_PATH=/absolute/path/to/wasi-sdk-34.0-platform
+export MPY_CROSS=/absolute/path/to/mpy-cross
+# Put Binaryen 133's bin directory on PATH; Node.js runs the build script.
+node examples/wasm-python/build.mjs
+TESSIVUM_GUEST_LANGUAGE=python \
+TESSIVUM_WASM_GUEST="$PWD/examples/wasm-python/dist/plugin.wasm" \
+  cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture
+TESSIVUM_WASM_GUEST="$PWD/examples/wasm-python/dist/plugin.wasm" \
+  cargo run --locked -p tessivum-runtime-smoke
+```
+
+Python implements the protocol and operations; C only embeds the upstream
+interpreter and binds Extism memory/Host calls. The build precompiles Python
+bytecode instead of spending instance fuel on compilation. It disables the
+SDK's automatic post-link optimizer, then explicitly spills WASM local pointers
+to the C stack before stripping metadata: conservative GC otherwise loses live
+roots during sustained execution. Standardized exception instructions and the
+existing Extism `wasmtime-exceptions` feature implement Python exceptions.
+Neither adds WASI authority or changes Host resource limits.
+
+The final artifact has five lifecycle exports, eight exact dotted Host imports,
+and no WASI imports. External imports, files, clock calls and stdout are
+unavailable; this is MicroPython, not CPython or arbitrary pip/C-extension
+compatibility. A strict syntax scan precedes MicroPython's permissive JSON
+decoder; surrogate pairs are normalized and lone surrogates rejected. The 16 MiB
+limit probe page-writes and frees real Extism memory; it does
+not claim a 16 MiB Python bytearray fits the default fuel budget. The interpreter
+uses a separate 768 KiB GC heap. Failed compiler experiments remain evidence,
+not alternate supported build paths.
+
+Timeout, cancellation, fuel exhaustion and uncaught exceptions leave a terminal
+Python VM: subsequent exports trap before interpreter access. Stop still drops
+the instance and revokes Host authority but reports the guest trap; create a new
+instance instead of retrying it. Normal error envelopes do not poison the VM.
+Explicit full-GC workload acceptance uses 100,000,000 fuel (the default
+10,000,000 is insufficient for that workload), while ordinary lifecycle and
+resource-limit acceptance retain the existing defaults.
 
 ### Capability functions
 

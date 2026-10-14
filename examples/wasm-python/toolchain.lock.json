@@ -1,0 +1,62 @@
+{
+  "node": "26.5.0",
+  "micropython": {
+    "version": "1.26.1",
+    "tag": "v1.26.1",
+    "commit": "647c8b96cae7e202c7a020395b7cfe65e5b8ce04",
+    "source": "https://github.com/micropython/micropython/archive/refs/tags/v1.26.1.tar.gz",
+    "sha256": "10600e844f02a8b448cf176df71031d2eb3d731097a809a963ce9c35cef3d613",
+    "directory": "target/w3-tools/micropython-1.26.1",
+    "override": "Set MICROPYTHON_DIR to the extracted source directory"
+  },
+  "mpyCross": {
+    "version": "1.26.1.post2",
+    "source": "https://pypi.org/project/mpy-cross/1.26.1.post2/",
+    "assets": {
+      "macos-universal2": {
+        "url": "https://files.pythonhosted.org/packages/c3/bb/cd03c8c51c3348d4d70d4be7ff937db6a52fc7db801e948adc17a9ab6dd6/mpy_cross-1.26.1.post2-py2.py3-none-macosx_11_0_universal2.whl",
+        "sha256": "fbfb6fb22e4bd60d1f4fc09466efad5e2b0458ace68a47a189a8cca07a4c61ef"
+      },
+      "linux-x86_64": {
+        "url": "https://files.pythonhosted.org/packages/d1/a8/4cf9aceeb5ce75f305004a4aec26809678b8b0c7037402e7d715c9dfb686/mpy_cross-1.26.1.post2-py2.py3-none-manylinux1_x86_64.whl",
+        "sha256": "a21322a88412bff215daab2720d71de419792ff203501f4a1ed1b6a5e6e8d83e"
+      }
+    },
+    "override": "Set MPY_CROSS to the executable extracted from the verified wheel, or install mpy-cross==1.26.1.post2"
+  },
+  "wasiSdk": {
+    "version": "34.0",
+    "release": "wasi-sdk-34",
+    "source": "https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34",
+    "assets": {
+      "aarch64-macos": {
+        "url": "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-arm64-macos.tar.gz",
+        "sha256": "9c59398106b417f8f14913380fdf0097a8cc0ff4af9eb3ce0065a859e88d49e9"
+      },
+      "x86_64-linux": {
+        "url": "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34/wasi-sdk-34.0-x86_64-linux.tar.gz",
+        "sha256": "b761e3a0721dbae9c09a0059e5fdb2bf917d1b4a8a7b430fb3b5aafb0984b2c4"
+      }
+    },
+    "directory": "target/w3-tools/wasi-sdk-34.0-<platform>",
+    "override": "Set WASI_SDK_PATH to the extracted SDK directory"
+  },
+  "binaryen": {
+    "version": 133,
+    "requiredExecutables": ["wasm-opt"],
+    "source": "https://github.com/WebAssembly/binaryen/releases/tag/version_133"
+  },
+  "pluginSource": {
+    "python": "plugin.py is compiled by mpy-cross 1.26.1 to portable bytecode and executed by the official MicroPython 1.26.1 embedding runtime",
+    "nativeBoundary": "guest.c contains Extism ABI bindings, a page-written/released Extism allocation probe, and MicroPython embedding bindings",
+    "pipDependencies": [],
+    "wasiImports": false
+  },
+  "upstreamConstraints": [
+    "The official embed port is generated from pinned upstream source; the interpreter is not vendored.",
+    "WASI SDK supplies Clang and static libc for compilation, but the finished module is rejected if any WASI import survives dead-code elimination.",
+    "The 768 KiB interpreter heap is separate from the real Extism buffer used by the 16 MiB memory-limit probe; that probe does not claim a 16 MiB Python bytearray fits the fuel budget.",
+    "Binaryen spills local pointers to the C stack for conservative GC and emits standardized exception instructions; Extism's wasmtime-exceptions feature is required.",
+    "External imports, filesystem access, clock calls and stdout are unavailable; this is not CPython or arbitrary pip/C-extension compatibility."
+  ]
+}

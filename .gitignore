@@ -3,3 +3,6 @@
 /node/compat-host/node_modules/
 /examples/wasm-typescript/node_modules/
 /examples/wasm-typescript/dist/
+/examples/wasm-go/dist/
+/examples/wasm-python/dist/
+/examples/wasm-python/__pycache__/

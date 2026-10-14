@@ -22,6 +22,8 @@ use tessivum_extism::{
 enum GuestLanguage {
     Rust,
     TypeScript,
+    Go,
+    Python,
 }
 
 impl GuestLanguage {
@@ -29,6 +31,8 @@ impl GuestLanguage {
         match self {
             Self::Rust => "rust",
             Self::TypeScript => "typescript",
+            Self::Go => "go",
+            Self::Python => "python",
         }
     }
 
@@ -36,6 +40,8 @@ impl GuestLanguage {
         match self {
             Self::Rust => "real-rust-matrix",
             Self::TypeScript => "real-typescript-matrix",
+            Self::Go => "real-go-matrix",
+            Self::Python => "real-python-matrix",
         }
     }
 
@@ -43,6 +49,8 @@ impl GuestLanguage {
         match self {
             Self::Rust => "tessivum_wasm_minimal.wasm",
             Self::TypeScript => "tessivum_wasm_typescript.wasm",
+            Self::Go => "tessivum_wasm_go.wasm",
+            Self::Python => "tessivum_wasm_python.wasm",
         }
     }
 
@@ -50,22 +58,27 @@ impl GuestLanguage {
         match self {
             Self::Rust => "real-rust",
             Self::TypeScript => "real-typescript",
+            Self::Go => "real-go",
+            Self::Python => "real-python",
         }
     }
 }
 
-static GUEST_LANGUAGE: LazyLock<GuestLanguage> =
-    LazyLock::new(|| match std::env::var("TESSIVUM_GUEST_LANGUAGE") {
+static GUEST_LANGUAGE: LazyLock<GuestLanguage> = LazyLock::new(|| {
+    match std::env::var("TESSIVUM_GUEST_LANGUAGE") {
         Ok(language) if language == "rust" => GuestLanguage::Rust,
         Ok(language) if language == "typescript" => GuestLanguage::TypeScript,
+        Ok(language) if language == "go" => GuestLanguage::Go,
+        Ok(language) if language == "python" => GuestLanguage::Python,
         Ok(language) => {
-            panic!("unsupported TESSIVUM_GUEST_LANGUAGE={language:?}; expected rust or typescript")
+            panic!("unsupported TESSIVUM_GUEST_LANGUAGE={language:?}; expected rust, typescript, go or python")
         }
         Err(std::env::VarError::NotPresent) => GuestLanguage::Rust,
         Err(std::env::VarError::NotUnicode(_)) => {
-            panic!("TESSIVUM_GUEST_LANGUAGE must be valid UTF-8 and either rust or typescript")
+            panic!("TESSIVUM_GUEST_LANGUAGE must be valid UTF-8: rust, typescript, go or python")
         }
-    });
+    }
+});
 
 static WASM: LazyLock<Vec<u8>> = LazyLock::new(|| {
     let path = guest_path();
@@ -86,9 +99,10 @@ fn guest_path() -> PathBuf {
     match language {
         GuestLanguage::Rust => Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/wasm32-unknown-unknown/debug/tessivum_wasm_minimal.wasm"),
-        GuestLanguage::TypeScript => {
-            panic!("TESSIVUM_WASM_GUEST is required when TESSIVUM_GUEST_LANGUAGE=typescript")
-        }
+        _ => panic!(
+            "TESSIVUM_WASM_GUEST is required when TESSIVUM_GUEST_LANGUAGE={}",
+            language.name()
+        ),
     }
 }
 
@@ -294,6 +308,8 @@ fn real_guest_rejects_invalid_manifest_and_requests() {
     for input in [
         "{not-json",
         r#"{"requestId":"bad","context":{},"payload":{},"extra":true}"#,
+        r#"{"RequestId":"bad","context":{},"payload":{}}"#,
+        r#"{"requestId":null,"context":{},"payload":{}}"#,
         r#"{"context":{},"payload":{}}"#,
     ] {
         let output: &str = raw.call("cordis_call", input).unwrap();
@@ -302,6 +318,25 @@ fn real_guest_rejects_invalid_manifest_and_requests() {
         assert_eq!(response["error"]["phase"], "call");
         assert!(response.get("result").is_none());
     }
+    if matches!(*GUEST_LANGUAGE, GuestLanguage::Python) {
+        for input in [
+            r#"{"requestId":"bad","context":{},"payload":"\ud83d"}"#,
+            r#"{"requestId":"bad","context":{},"payload":"\ude00"}"#,
+            r#"{"requestId":"bad","context":{},"payload":"\ud83d\u0041"}"#,
+        ] {
+            let output: &str = raw.call("cordis_call", input).unwrap();
+            let response: Value = serde_json::from_str(output).unwrap();
+            assert_eq!(response["error"]["code"], "invalid_request");
+        }
+    }
+    let output: &str = raw
+        .call("cordis_call", r#"{"requestId":"unicode","context":{},"payload":{"text":"\ud83d\ude00","literal":"\\ud83d\\ude00"}}"#)
+        .unwrap();
+    let response: Value = serde_json::from_str(output).unwrap();
+    assert_eq!(
+        response["result"]["echo"],
+        json!({"text":"\u{1f600}","literal":r"\ud83d\ude00"})
+    );
 }
 
 #[test]
@@ -482,11 +517,30 @@ fn real_guest_all_host_functions_grant_deny_revoke_and_mutate_state() {
 }
 
 fn assert_fault(limits: ResourceLimits, payload: Value, code: &str) {
-    let error = instance(Arc::new(CapabilityRegistry::default()), limits, json!({}))
+    let guest = instance(Arc::new(CapabilityRegistry::default()), limits, json!({}));
+    let error = guest
         .call(json!({}), payload)
         .expect_err("deliberate guest fault must fail closed");
     assert_eq!(error.code, code);
     assert_eq!(error.phase, "call");
+    if matches!(code, "GUEST_TRAP" | "FUEL_LIMIT_EXCEEDED") {
+        assert_interrupted_python(&guest);
+    }
+}
+
+fn assert_interrupted_python(guest: &WasmPluginInstance) {
+    if matches!(*GUEST_LANGUAGE, GuestLanguage::Python) {
+        assert_eq!(
+            guest.call(json!({}), json!({})).unwrap_err().code,
+            "GUEST_TRAP"
+        );
+        assert_eq!(guest.stop().unwrap_err().code, "GUEST_TRAP");
+        assert!(guest.is_stopped());
+        assert_eq!(
+            guest.call(json!({}), json!({})).unwrap_err().code,
+            "INSTANCE_STOPPED"
+        );
+    }
 }
 
 #[test]
@@ -509,7 +563,7 @@ fn real_guest_errors_malformed_trap_and_resource_limits_fail_closed() {
         json!({ "op": "trap" }),
         "GUEST_TRAP",
     );
-    if matches!(*GUEST_LANGUAGE, GuestLanguage::TypeScript) {
+    if !matches!(*GUEST_LANGUAGE, GuestLanguage::Rust) {
         assert_fault(
             ResourceLimits::default(),
             json!({ "op": "wasi-clock" }),
@@ -579,6 +633,35 @@ fn real_guest_errors_malformed_trap_and_resource_limits_fail_closed() {
             .unwrap()["allocated"],
         16 * 1024 * 1024
     );
+    if matches!(*GUEST_LANGUAGE, GuestLanguage::Python) {
+        let allowed = instance(
+            Arc::new(CapabilityRegistry::default()),
+            ResourceLimits {
+                fuel: 100_000_000,
+                ..ResourceLimits::default()
+            },
+            json!({}),
+        );
+        // Explicit collection must preserve live Python objects and subsequent exports.
+        assert_eq!(
+            allowed.call(json!({}), json!({"op":"gc"})).unwrap(),
+            json!({"checksum":2016,"last":63})
+        );
+        assert_eq!(
+            allowed.event(json!({}), json!({})).unwrap(),
+            json!({"accepted":true})
+        );
+        assert_eq!(
+            allowed.update(json!({}), json!({"revision":2})).unwrap(),
+            json!({"updated":true})
+        );
+        assert_eq!(allowed.config(), json!({"revision":2}));
+        allowed.stop().unwrap();
+        assert_eq!(
+            allowed.call(json!({}), Value::Null).unwrap_err().code,
+            "INSTANCE_STOPPED"
+        );
+    }
 
     let memory = ResourceLimits {
         memory_pages: 128,
@@ -614,6 +697,7 @@ fn real_guest_errors_malformed_trap_and_resource_limits_fail_closed() {
         started.elapsed() < Duration::from_secs(1),
         "timeout must interrupt, not wait for fuel exhaustion"
     );
+    assert_interrupted_python(&timed);
 }
 
 #[test]
@@ -652,6 +736,7 @@ fn real_guest_cancellation_interrupts_running_wasm() {
     call.join().expect("guest call thread does not panic");
     assert_eq!(error.code, "CANCELLED");
     assert_eq!(error.phase, "call");
+    assert_interrupted_python(&guest);
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
