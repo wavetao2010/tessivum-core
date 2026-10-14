@@ -1,0 +1,606 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    future::Future,
+    io::ErrorKind,
+    net::TcpListener,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
+    task::{Context, Poll, Waker},
+    thread,
+    time::Duration,
+};
+
+use serde_json::{json, Value};
+use tessivum_core::{ContextHandle, Entry, LoaderRuntime, ResolvedPackage, RuntimeHandle};
+use tessivum_extism::{
+    Capability, CapabilityRegistry, CapabilityRequest, ExtismGuestEngine, GuestExport,
+    PluginManifest, ResourceLimits, WasmPackage, WasmPluginInstance, WasmPluginRuntime, WasmResult,
+    ABI_VERSION,
+};
+static WASM: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let path = guest_path();
+    fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "cannot read compiled Rust guest at {}: {error}; set TESSIVUM_WASM_GUEST or build tessivum-wasm-minimal for wasm32-unknown-unknown",
+            path.display()
+        )
+    })
+});
+
+fn guest_path() -> PathBuf {
+    std::env::var_os("TESSIVUM_WASM_GUEST")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/wasm32-unknown-unknown/debug/tessivum_wasm_minimal.wasm")
+        })
+}
+
+fn wasm() -> Vec<u8> {
+    WASM.clone()
+}
+
+fn manifest() -> PluginManifest {
+    PluginManifest {
+        id: "real-rust-matrix".into(),
+        version: "1.0.0".into(),
+        entry: "tessivum_wasm_minimal.wasm".into(),
+        abi: ABI_VERSION.into(),
+        inject: Vec::new(),
+        permissions: Capability::ALL.to_vec(),
+        config_schema: json!({ "type": "object" }),
+        exports: GuestExport::ALL.to_vec(),
+    }
+}
+
+fn package() -> WasmPackage {
+    WasmPackage::from_bytes(manifest(), wasm()).expect("compiled Rust guest satisfies the v1 ABI")
+}
+
+fn instance(
+    registry: Arc<CapabilityRegistry>,
+    limits: ResourceLimits,
+    config: Value,
+) -> WasmPluginInstance {
+    WasmPluginInstance::instantiate(
+        package(),
+        Arc::new(ExtismGuestEngine),
+        registry,
+        limits,
+        config,
+    )
+    .expect("compiled Rust guest instantiates in the real Extism engine")
+}
+
+#[derive(Default)]
+struct Effects {
+    logs: Vec<String>,
+    config: BTreeMap<String, Value>,
+    service_calls: usize,
+    emitted: Vec<(String, Value)>,
+    subscriptions: BTreeMap<String, String>,
+    next_subscription: usize,
+    kv: BTreeMap<String, Value>,
+    seen: Vec<(Capability, String, String)>,
+}
+
+struct HostState(Mutex<Effects>);
+
+impl HostState {
+    fn new() -> Self {
+        let mut effects = Effects::default();
+        effects.config.insert("theme".into(), json!("dark"));
+        Self(Mutex::new(effects))
+    }
+
+    fn handle(&self, request: CapabilityRequest) -> WasmResult<Value> {
+        assert_eq!(request.plugin_id, "real-rust-matrix");
+        assert_ne!(request.instance_id, request.plugin_id);
+        let mut effects = self.0.lock().expect("host effects are available");
+        effects
+            .seen
+            .push((request.capability, request.plugin_id, request.instance_id));
+        match request.capability {
+            Capability::Log => {
+                assert_eq!(request.payload["level"], "info");
+                let message = request.payload["message"]
+                    .as_str()
+                    .expect("log message is a string")
+                    .to_owned();
+                effects.logs.push(message);
+                Ok(Value::Null)
+            }
+            Capability::ConfigGet => {
+                let key = request.payload["key"]
+                    .as_str()
+                    .expect("config key is a string");
+                Ok(effects.config.get(key).cloned().unwrap_or(Value::Null))
+            }
+            Capability::ServiceCall => {
+                assert_eq!(request.payload["service"], "math");
+                assert_eq!(request.payload["method"], "increment");
+                effects.service_calls += 1;
+                Ok(json!(
+                    request.payload["payload"]["value"]
+                        .as_i64()
+                        .expect("service value is an integer")
+                        + 1
+                ))
+            }
+            Capability::EventEmit => {
+                let topic = request.payload["topic"]
+                    .as_str()
+                    .expect("event topic is a string")
+                    .to_owned();
+                effects
+                    .emitted
+                    .push((topic, request.payload["payload"].clone()));
+                Ok(Value::Null)
+            }
+            Capability::EventSubscribe => {
+                let topic = request.payload["topic"]
+                    .as_str()
+                    .expect("subscription topic is a string")
+                    .to_owned();
+                effects.next_subscription += 1;
+                let id = format!("sub-{}", effects.next_subscription);
+                effects.subscriptions.insert(id.clone(), topic);
+                Ok(json!({ "id": id }))
+            }
+            Capability::RegistrationDispose => {
+                let id = request.payload["id"]
+                    .as_str()
+                    .expect("registration id is a string");
+                assert!(
+                    effects.subscriptions.remove(id).is_some(),
+                    "disposing a real subscription mutates host state"
+                );
+                Ok(Value::Null)
+            }
+            Capability::KvGet => {
+                let key = request.payload["key"].as_str().expect("kv key is a string");
+                Ok(effects.kv.get(key).cloned().unwrap_or(Value::Null))
+            }
+            Capability::KvSet => {
+                let key = request.payload["key"]
+                    .as_str()
+                    .expect("kv key is a string")
+                    .to_owned();
+                effects.kv.insert(key, request.payload["value"].clone());
+                Ok(Value::Null)
+            }
+        }
+    }
+}
+
+fn registry(grant_all: bool) -> (Arc<CapabilityRegistry>, Arc<HostState>) {
+    let registry = Arc::new(CapabilityRegistry::new());
+    let state = Arc::new(HostState::new());
+    for capability in Capability::ALL {
+        let state = Arc::clone(&state);
+        registry
+            .register(capability, move |request| state.handle(request))
+            .expect("each host capability registers once");
+        if grant_all {
+            registry.grant(capability);
+        }
+    }
+    (registry, state)
+}
+
+fn capability_call(instance: &WasmPluginInstance, capability: Capability) -> Value {
+    instance
+        .call(
+            json!({ "source": "real-rust-matrix" }),
+            json!({ "op": "capability", "capability": capability.as_str() }),
+        )
+        .expect("the guest reports host capability outcomes as a result")
+}
+
+fn assert_denied(result: &Value) {
+    assert_eq!(result["ok"], false);
+    assert_eq!(result["error"]["code"], "PERMISSION_DENIED");
+    assert_eq!(result["error"]["phase"], "call");
+}
+
+#[test]
+#[ignore = "requires compiled Rust guest"]
+fn real_guest_rejects_invalid_manifest_and_requests() {
+    let mut invalid = manifest();
+    invalid.abi = "cordis.plugin/v2".into();
+    assert_eq!(
+        WasmPackage::from_bytes(invalid, wasm()).unwrap_err().code,
+        "ABI_UNSUPPORTED"
+    );
+    let mut missing = manifest();
+    missing.exports.pop();
+    assert_eq!(
+        WasmPackage::from_bytes(missing, wasm()).unwrap_err().code,
+        "MANIFEST_INVALID"
+    );
+    let functions = Capability::ALL.into_iter().map(|capability| {
+        extism::Function::new(
+            capability.as_str(),
+            [extism::PTR],
+            [extism::PTR],
+            extism::UserData::new(()),
+            |_, _, _, _| panic!("malformed requests must not reach a host function"),
+        )
+        .with_namespace("extism:host/user")
+    });
+    let mut raw = extism::PluginBuilder::new(
+        extism::Manifest::new([extism::Wasm::data(wasm())]).disallow_all_hosts(),
+    )
+    .with_functions(functions)
+    .with_wasi(false)
+    .build()
+    .unwrap();
+    for input in [
+        "{not-json",
+        r#"{"requestId":"bad","context":{},"payload":{},"extra":true}"#,
+        r#"{"context":{},"payload":{}}"#,
+    ] {
+        let output: &str = raw.call("cordis_call", input).unwrap();
+        let response: Value = serde_json::from_str(output).unwrap();
+        assert_eq!(response["error"]["code"], "invalid_request");
+        assert_eq!(response["error"]["phase"], "call");
+        assert!(response.get("result").is_none());
+    }
+}
+
+#[test]
+#[ignore = "requires compiled Rust guest"]
+fn real_guest_manifest_envelopes_five_exports_update_and_unload() {
+    let bytes = wasm();
+    for forbidden_import in [b"wasi_snapshot_preview1".as_slice(), b"wasi_unstable"] {
+        assert!(
+            !bytes
+                .windows(forbidden_import.len())
+                .any(|window| window == forbidden_import),
+            "minimal Rust guest must not depend on WASI"
+        );
+    }
+
+    let (registry, state) = registry(true);
+    let guest = instance(
+        registry,
+        ResourceLimits::default(),
+        json!({ "matrix": true, "revision": 1 }),
+    );
+    assert_eq!(guest.manifest(), &manifest());
+    assert_eq!(guest.manifest().exports, GuestExport::ALL.to_vec());
+
+    assert_eq!(
+        guest
+            .init(json!({ "entry": "matrix" }))
+            .expect("init succeeds"),
+        json!({ "abi": ABI_VERSION, "initialized": true })
+    );
+    let call = guest
+        .call(
+            json!({ "trace": "ctx-1" }),
+            json!({ "op": "inspect", "answer": 42 }),
+        )
+        .expect("call succeeds");
+    assert_eq!(call["context"], json!({ "trace": "ctx-1" }));
+    assert_eq!(call["payload"], json!({ "op": "inspect", "answer": 42 }));
+    assert!(
+        call["requestId"]
+            .as_str()
+            .is_some_and(|request_id| request_id.starts_with(guest.instance_id())),
+        "real request and response envelopes preserve the generated request id"
+    );
+    assert_eq!(
+        guest
+            .event(json!({ "trace": "ctx-2" }), json!({ "topic": "notice" }))
+            .expect("event succeeds"),
+        json!({ "accepted": true })
+    );
+    assert_eq!(
+        guest
+            .update(
+                json!({ "trace": "ctx-3" }),
+                json!({ "matrix": true, "revision": 2 }),
+            )
+            .expect("update succeeds"),
+        json!({ "updated": true })
+    );
+    assert_eq!(guest.config(), json!({ "matrix": true, "revision": 2 }));
+    guest.stop().expect("stop export succeeds");
+    let stopped = guest
+        .call(json!({}), Value::Null)
+        .expect_err("unloaded instance rejects its old handle");
+    assert_eq!(stopped.code, "INSTANCE_STOPPED");
+
+    let effects = state.0.lock().expect("host effects are available");
+    assert_eq!(
+        effects.logs,
+        [
+            "lifecycle:init",
+            "lifecycle:call",
+            "lifecycle:event",
+            "lifecycle:update",
+            "lifecycle:stop",
+        ]
+    );
+}
+
+#[test]
+#[ignore = "requires compiled Rust guest"]
+fn real_guest_all_host_functions_grant_deny_revoke_and_mutate_state() {
+    let (registry, state) = registry(false);
+    let guest = instance(Arc::clone(&registry), ResourceLimits::default(), json!({}));
+
+    let mut undeclared = manifest();
+    undeclared.permissions.clear();
+    let denied = WasmPluginInstance::instantiate(
+        WasmPackage::from_bytes(undeclared, wasm()).unwrap(),
+        Arc::new(ExtismGuestEngine),
+        Arc::clone(&registry),
+        ResourceLimits::default(),
+        json!({}),
+    )
+    .unwrap();
+    for capability in Capability::ALL {
+        assert_denied(&capability_call(&guest, capability));
+        registry.grant(capability);
+        assert_denied(&capability_call(&denied, capability));
+        let granted = capability_call(&guest, capability);
+        assert_eq!(granted["ok"], true, "{} is callable", capability.as_str());
+        match capability {
+            Capability::ConfigGet => assert_eq!(granted["value"], "dark"),
+            Capability::ServiceCall => assert_eq!(granted["value"], 42),
+            Capability::EventSubscribe => assert_eq!(granted["value"]["id"], "sub-1"),
+            Capability::KvGet => assert_eq!(granted["value"], Value::Null),
+            _ => {}
+        }
+        registry.revoke(capability);
+        assert_denied(&capability_call(&guest, capability));
+    }
+
+    registry.grant(Capability::KvGet);
+    let stored = capability_call(&guest, Capability::KvGet);
+    assert_eq!(stored, json!({ "ok": true, "value": 9 }));
+    registry.revoke(Capability::KvGet);
+
+    let effects = state.0.lock().expect("host effects are available");
+    assert_eq!(effects.logs, ["matrix-log"]);
+    assert_eq!(effects.service_calls, 1);
+    assert_eq!(
+        effects.emitted,
+        [("matrix.notice".into(), json!({ "value": 7 }))]
+    );
+    assert!(effects.subscriptions.is_empty());
+    assert_eq!(effects.kv.get("matrix-key"), Some(&json!(9)));
+    let seen_capabilities = effects
+        .seen
+        .iter()
+        .map(|(capability, _, _)| *capability)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        seen_capabilities,
+        Capability::ALL.into_iter().collect::<BTreeSet<_>>()
+    );
+    let instance_ids = effects
+        .seen
+        .iter()
+        .map(|(_, _, instance_id)| instance_id.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(instance_ids, BTreeSet::from([guest.instance_id()]));
+}
+
+fn assert_fault(limits: ResourceLimits, payload: Value, code: &str) {
+    let error = instance(Arc::new(CapabilityRegistry::default()), limits, json!({}))
+        .call(json!({}), payload)
+        .expect_err("deliberate guest fault must fail closed");
+    assert_eq!(error.code, code);
+    assert_eq!(error.phase, "call");
+}
+
+#[test]
+#[ignore = "requires compiled Rust guest"]
+fn real_guest_errors_malformed_trap_and_resource_limits_fail_closed() {
+    assert_fault(
+        ResourceLimits::default(),
+        json!({ "op": "reject" }),
+        "GUEST_REJECTED",
+    );
+    for op in ["malformed", "unknown-field", "wrong-id", "both-results"] {
+        assert_fault(
+            ResourceLimits::default(),
+            json!({ "op": op }),
+            "PROTOCOL_INVALID",
+        );
+    }
+    assert_fault(
+        ResourceLimits::default(),
+        json!({ "op": "trap" }),
+        "GUEST_TRAP",
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback probe binds");
+    listener
+        .set_nonblocking(true)
+        .expect("loopback probe is nonblocking");
+    let address = listener
+        .local_addr()
+        .expect("loopback address is available");
+    let network = instance(
+        Arc::new(CapabilityRegistry::default()),
+        ResourceLimits::default(),
+        json!({}),
+    )
+    .call(
+        json!({}),
+        json!({ "op": "network", "url": format!("http://{address}/") }),
+    );
+    assert!(
+        matches!(listener.accept(), Err(error) if error.kind() == ErrorKind::WouldBlock),
+        "default sandbox must block network before a connection is made"
+    );
+    let network = network.expect_err("default sandbox denies guest network");
+    assert_eq!(network.code, "GUEST_TRAP");
+    assert_eq!(network.phase, "call");
+
+    let input = ResourceLimits {
+        max_input_bytes: 128,
+        ..ResourceLimits::default()
+    };
+    assert_fault(
+        input,
+        json!({ "op": "inspect", "data": "x".repeat(256) }),
+        "INPUT_LIMIT_EXCEEDED",
+    );
+
+    let output = ResourceLimits {
+        max_output_bytes: 512,
+        ..ResourceLimits::default()
+    };
+    assert_fault(
+        output,
+        json!({ "op": "output", "bytes": 4096 }),
+        "OUTPUT_LIMIT_EXCEEDED",
+    );
+    let allowed = instance(
+        Arc::new(CapabilityRegistry::default()),
+        ResourceLimits::default(),
+        json!({}),
+    );
+    assert_eq!(
+        allowed
+            .call(json!({}), json!({"op":"output", "bytes":4096}))
+            .unwrap()["data"],
+        "x".repeat(4096)
+    );
+    assert_eq!(
+        allowed
+            .call(
+                json!({}),
+                json!({"op":"allocate", "bytes":16 * 1024 * 1024})
+            )
+            .unwrap()["allocated"],
+        16 * 1024 * 1024
+    );
+
+    let memory = ResourceLimits {
+        memory_pages: 128,
+        ..ResourceLimits::default()
+    };
+    assert_fault(
+        memory,
+        json!({ "op": "allocate", "bytes": 16 * 1024 * 1024 }),
+        "GUEST_TRAP",
+    );
+
+    let fuel = ResourceLimits {
+        fuel: 10_000,
+        ..ResourceLimits::default()
+    };
+    assert_fault(fuel, json!({ "op": "spin" }), "FUEL_LIMIT_EXCEEDED");
+
+    let timeout = ResourceLimits {
+        timeout: Duration::from_millis(20),
+        fuel: 10_000_000_000,
+        ..ResourceLimits::default()
+    };
+    let timed = instance(Arc::new(CapabilityRegistry::default()), timeout, json!({}));
+    let started = std::time::Instant::now();
+    assert_eq!(
+        timed
+            .call(json!({}), json!({"op":"spin"}))
+            .unwrap_err()
+            .code,
+        "TIMEOUT"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "timeout must interrupt, not wait for fuel exhaustion"
+    );
+}
+
+#[test]
+#[ignore = "requires compiled Rust guest"]
+fn real_guest_cancellation_interrupts_running_wasm() {
+    let limits = ResourceLimits {
+        fuel: 10_000_000_000,
+        ..ResourceLimits::default()
+    };
+    let registry = Arc::new(CapabilityRegistry::default());
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    registry
+        .register(Capability::Log, move |request: CapabilityRequest| {
+            assert_eq!(request.payload["message"], "spin-ready");
+            ready_tx.send(()).unwrap();
+            Ok(Value::Null)
+        })
+        .unwrap();
+    registry.grant(Capability::Log);
+    let guest = Arc::new(instance(registry, limits, json!({})));
+    let running = Arc::clone(&guest);
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let call = thread::spawn(move || {
+        finished_tx
+            .send(running.call(json!({}), json!({ "op": "spin", "signalReady": true })))
+            .unwrap();
+    });
+    ready_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("guest reached real WASM execution");
+    assert!(guest.cancel_current(), "running Extism call is cancellable");
+    let error = finished_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("cancellation interrupts before the five-second execution backstop")
+        .expect_err("cancelled guest call cannot report success");
+    call.join().expect("guest call thread does not panic");
+    assert_eq!(error.code, "CANCELLED");
+    assert_eq!(error.phase, "call");
+}
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    let waker: &Waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = Box::pin(future);
+    loop {
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(value) => return value,
+            Poll::Pending => thread::yield_now(),
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires compiled Rust guest"]
+fn real_runtime_dispose_invokes_stop_and_invalidates_old_handle() {
+    let (registry, state) = registry(true);
+    let runtime = WasmPluginRuntime::new(registry, ResourceLimits::default());
+    runtime
+        .register("real-rust", package())
+        .expect("real Rust package registers");
+    let entry: Entry = serde_json::from_value(json!({
+        "package": "real-rust",
+        "id": "real-rust-entry",
+        "runtime": "wasm",
+        "config": { "matrix": true }
+    }))
+    .expect("runtime entry parses");
+    let mut handle: Box<dyn RuntimeHandle> = block_on(runtime.instantiate(
+        ResolvedPackage {
+            specifier: "real-rust".into(),
+            location: String::new(),
+        },
+        entry,
+        ContextHandle::root(),
+    ))
+    .expect("real runtime handle instantiates");
+
+    block_on(handle.activate()).expect("real runtime activates init");
+    block_on(handle.dispose()).expect("real runtime unloads stop");
+    assert!(
+        block_on(handle.activate()).is_err(),
+        "disposed runtime handle cannot be reactivated"
+    );
+    assert_eq!(
+        state.0.lock().expect("host effects are available").logs,
+        ["lifecycle:init", "lifecycle:stop"]
+    );
+}

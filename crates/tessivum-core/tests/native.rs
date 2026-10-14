@@ -564,6 +564,53 @@ impl NativePlugin for FailingPlugin {
         Box::pin(async { Ok(()) })
     }
 }
+struct RecoveringPlugin {
+    attempts: Arc<AtomicUsize>,
+    stops: Arc<AtomicUsize>,
+}
+
+impl NativePlugin for RecoveringPlugin {
+    fn descriptor(&self) -> NativePluginDescriptor {
+        NativePluginDescriptor {
+            name: "recovering".into(),
+            version: "1.0.0".into(),
+            dependencies: vec![Dependency::Required(managed_dependency_service())],
+            config_schema: NativeConfigSchema::Any,
+        }
+    }
+
+    fn start<'a>(
+        &'a mut self,
+        context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        let attempts = Arc::clone(&self.attempts);
+        Box::pin(async move {
+            context.provide(managed_service(), ManagedService("recovered"))?;
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(NativePluginError::Runtime {
+                    package: "recovering".into(),
+                    message: "first start fails".into(),
+                })
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn update<'a>(
+        &'a mut self,
+        _context: ContextHandle,
+        _config: &'a Value,
+    ) -> NativePluginFuture<'a> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn stop<'a>(&'a mut self, _context: ContextHandle) -> NativePluginFuture<'a> {
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { Ok(()) })
+    }
+}
 
 struct Resolver;
 
@@ -1130,6 +1177,9 @@ async fn native_loader_runs_provider_consumer_removal_replacement_and_root_dispo
         .unload()
         .await
         .expect("native instances quiesce before root disposal");
+    root.events()
+        .emit(&notice_event(), &Notice("after-unload"))
+        .expect("dispatch after unload has no native listeners");
     root.scope()
         .dispose()
         .await
@@ -1232,6 +1282,78 @@ async fn repeated_activation_reports_the_original_failure_without_hanging() {
             .to_string(),
         first
     );
+}
+
+#[tokio::test]
+async fn dependency_change_retries_failed_native_activation() {
+    let root = ContextHandle::root();
+    root.provide(managed_dependency_service(), 1_u8)
+        .expect("initial dependency registers");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let stops = Arc::new(AtomicUsize::new(0));
+    let mut runtime = NativePluginRuntime::new();
+    runtime
+        .register("recovering", {
+            let attempts = Arc::clone(&attempts);
+            let stops = Arc::clone(&stops);
+            move || RecoveringPlugin {
+                attempts: Arc::clone(&attempts),
+                stops: Arc::clone(&stops),
+            }
+        })
+        .expect("recovering factory registers");
+    let mut handle = runtime
+        .instantiate(
+            ResolvedPackage {
+                specifier: "recovering".into(),
+                location: "recovering".into(),
+            },
+            entry("recovering", "recovering", Value::Null),
+            root.clone(),
+        )
+        .await
+        .expect("recovering plugin instantiates");
+
+    let first = tokio::time::timeout(Duration::from_secs(2), handle.activation())
+        .await
+        .expect("initial activation settles")
+        .expect_err("the first start fails");
+    assert!(first.to_string().contains("first start fails"));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
+    assert!(root
+        .get::<ManagedService>(&managed_service())
+        .expect("rolled-back service lookup succeeds")
+        .is_none());
+
+    root.replace(managed_dependency_service(), 2_u8)
+        .expect("dependency generation changes");
+    tokio::time::timeout(Duration::from_secs(2), handle.activation())
+        .await
+        .expect("dependency change retries activation")
+        .expect("the retried activation succeeds");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let service = root
+        .get::<ManagedService>(&managed_service())
+        .expect("recovered service lookup succeeds")
+        .expect("recovered service is active");
+    assert_eq!(service.with(|service| service.0).unwrap(), "recovered");
+
+    handle.dispose().await.expect("recovered plugin disposes");
+    handle
+        .dispose()
+        .await
+        .expect("repeated disposal is idempotent");
+    assert_eq!(stops.load(Ordering::SeqCst), 2);
+    assert!(matches!(
+        service.with(|service| service.0),
+        Err(CoreError::StaleServiceHandle { .. })
+    ));
+    assert!(root
+        .get::<ManagedService>(&managed_service())
+        .expect("disposed service lookup succeeds")
+        .is_none());
+    root.scope().dispose().await.expect("test root disposes");
 }
 
 #[tokio::test]
@@ -1459,10 +1581,10 @@ async fn native_update_keeps_candidate_live_when_old_stop_fails() {
         instance.update(Value::Null).await,
         Err(NativePluginError::Runtime { message, .. }) if message == "old stop fails"
     ));
-    assert!(
-        !old_service.is_current(),
-        "committing the candidate invalidates only the retired provider"
-    );
+    assert!(matches!(
+        old_service.with(|service| service.0),
+        Err(CoreError::StaleServiceHandle { .. })
+    ));
     let service = root
         .get::<ManagedService>(&managed_service())
         .expect("candidate service lookup succeeds")

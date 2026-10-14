@@ -1190,10 +1190,17 @@ impl ManagedControl {
     }
 
     fn set_cancellation(&self, cancellation: CancellationToken) {
-        self.state
+        let mut state = self
+            .state
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .cancellation = Some(cancellation);
+            .unwrap_or_else(|poison| poison.into_inner());
+        if state.stopping {
+            // Recovery may publish a fresh token after disposal cancelled the old one.
+            drop(state);
+            cancellation.cancel();
+        } else {
+            state.cancellation = Some(cancellation);
+        }
     }
 
     fn request_activation(&self) {
@@ -1436,6 +1443,17 @@ fn run_managed_native(
             continue;
         }
 
+        if !matches!(
+            instance.fiber().state(),
+            FiberState::Pending | FiberState::Active
+        ) {
+            if let Err(error) = native_block_on(&runtime, instance.suspend()) {
+                control.set_phase(ManagedPhase::Failed, Some(error));
+                continue;
+            }
+            control.set_cancellation(instance.cancellation());
+        }
+
         match instance.fiber().state() {
             FiberState::Pending => {
                 control.set_phase(ManagedPhase::Starting, None);
@@ -1463,13 +1481,10 @@ fn run_managed_native(
                 }
             }
             FiberState::Active => control.set_phase(ManagedPhase::Active, None),
-            _ => match native_block_on(&runtime, instance.suspend()) {
-                Ok(()) => {
-                    control.set_cancellation(instance.cancellation());
-                    control.set_phase(ManagedPhase::Pending, None);
-                }
-                Err(error) => control.set_phase(ManagedPhase::Failed, Some(error)),
-            },
+            state => control.set_phase(
+                ManagedPhase::Failed,
+                Some(invalid_state("restart native plugin", state)),
+            ),
         }
     }
 }
@@ -1530,5 +1545,31 @@ impl RuntimeHandle for NativeRuntimeHandle {
                 None => Ok(()),
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn stopping_cancels_a_replacement_fiber_token_in_either_order() {
+        for stop_first in [false, true] {
+            let control = ManagedControl::new(&[], None);
+            let old = Scope::root().cancellation();
+            control.set_cancellation(old);
+            if stop_first {
+                control.stop().unwrap().cancel();
+            }
+            let replacement = Scope::root().cancellation();
+            control.set_cancellation(replacement.clone());
+            if !stop_first {
+                control.stop().unwrap().cancel();
+            }
+            assert!(
+                replacement.is_cancelled(),
+                "recovered plugin must observe disposal"
+            );
+        }
     }
 }

@@ -96,13 +96,14 @@ The host requires an exact response envelope with a matching `requestId` and exa
 }
 ```
 
-The response `requestId` must match the request. If `error` is present, the
-host returns it; otherwise `result` is required. Guests should send one of the
-two forms above, even though the current Rust response deserializer ignores
-unknown fields. Consumers must branch on `code` and `phase`, not `message` or
-`details`. The host rejects an oversized input/output, malformed JSON,
-mismatched request ID, or a response without `result` and `error` with a
-structured `PluginError`.
+The response `requestId` must match the request. Exactly one of `result` or
+non-null `error` is required; unknown top-level request/response fields are
+rejected, including an `ok` discriminator. An error's `phase` must match the
+invoked export. Valid guest errors become `GUEST_REJECTED` with a host-owned
+message and phase; guest-controlled code, message and details are not forwarded.
+Consumers must branch on host error `code` and `phase`, not `message` or
+`details`. Oversized input/output, malformed JSON, mismatched request IDs and
+invalid envelopes fail with a structured `PluginError`.
 
 `tessivum-pdk::export_guest!` implements the two documented forms for Rust
 guests. It does not emit an `ok` discriminator.

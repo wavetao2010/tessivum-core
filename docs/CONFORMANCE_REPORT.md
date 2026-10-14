@@ -133,3 +133,40 @@ cargo test -p tessivum-core --test conformance
 ```
 
 The check starts the conformance binary for six equal fixtures and both approved-difference fixtures, requires Rust `PASS`, and asserts every declared case executed. Empty baselines still fail. Bun tests assert each equal observation, corrupted-baseline rejection, and the exact three upstream retained-reference differences. Raw pending-config and retained-reference oracle commands deliberately remain nonzero `MISMATCH`; the difference ledger does not change runner exit semantics.
+
+## C2 Native and real Rust WASM — 2026-10-14
+
+Validated on macOS ARM64 with Rust 1.97.1 and Extism 1.30.0, based on
+`08d87f93fe92c7dbe74446bc7e5f563c687da84a`. This is source acceptance, not a release.
+
+| Contract | Executed evidence |
+|---|---|
+| Native lifecycle | `tests/native.rs`: 16 passed; dependency waiting/arrival/removal, optional dependencies, candidate rollback, cancellation, cleanup, stale services, post-unload event silence. `native-minimal` ran provider replacement and consumer reload with zero remaining resources. |
+| Failed Native activation recovery | `dependency_change_retries_failed_native_activation` timed out before the fix, then passed. The next ready dependency notification now both resets and retries the failed fiber; repeated observation alone still does not retry. |
+| Native cancellation handoff | The deterministic both-order token-publication regression fails before and passes after the fix. Publishing a replacement fiber token after disposal began cancels it immediately, outside the control mutex. |
+| Rust ABI | `tests/real_guest.rs` uses the compiled Rust guest and real Extism: manifest/ABI rejection, malformed/unknown-field requests, five exports, context and payload, invalid/mismatched/ambiguous responses, redacted guest errors and trap. |
+| Host Functions | All eight PDK calls execute over WASM memory with stateful logging, config, arithmetic service, subscription/event and KV handlers. Undeclared permissions, absent grants and revoked grants fail without the corresponding host mutation. |
+| Resource/security limits | The same allocation and output succeed with sufficient limits, then fail with lower limits. Infinite-loop timeout and cancellation finish within one second, independently of fuel or the five-second backstop; cancellation follows a real guest readiness callback. A loopback listener stays open throughout the network probe and observes no connection. Default WASI/network settings remain disabled; no sandbox policy was loosened. |
+| Update/unload | Committed config changes after update; all five lifecycle exports observed through guest logging; stopped instance and disposed runtime handle reject further work. Product policy generations are separately verified by the consumer. |
+
+Core workspace/all-targets: **132 passed**; the six artifact-dependent matrix tests
+are ignored by that general command and **all six passed separately** with the
+explicit compiled artifact. Strict Clippy passed. `runtime-smoke` also ran actual
+Native, Extism WASM and Legacy Node activation and teardown. The guest SHA-256 is
+`97778fbcdd77c079263be5aba4627de10c732a1eebbbd25c069b4e9927e7feb7`.
+
+```sh
+cargo build --locked --release --target wasm32-unknown-unknown -p tessivum-wasm-minimal
+TESSIVUM_WASM_GUEST="$PWD/target/wasm32-unknown-unknown/release/tessivum_wasm_minimal.wasm" \
+  cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture
+TESSIVUM_WASM_GUEST="$PWD/target/wasm32-unknown-unknown/release/tessivum_wasm_minimal.wasm" \
+  cargo run --locked -p tessivum-runtime-smoke
+cargo run --locked -p tessivum-native-minimal
+```
+
+CI invokes the matrix after compilation; a missing artifact is a failure, never
+a silent success. Native remains fully trusted with cooperative cancellation;
+host capability handlers need their own deadlines/quotas. This does not certify
+TS/JS, Go, Python, other platforms, product profiles or release archives. Full
+local command output, including the initial failing regression and corrected
+test/lint failures, is retained in product `test-artifacts/c2-complete/`.

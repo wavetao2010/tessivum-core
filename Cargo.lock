@@ -1989,6 +1989,7 @@ name = "tessivum-wasm-minimal"
 version = "0.1.0"
 dependencies = [
  "extism-pdk",
+ "serde",
  "serde_json",
  "tessivum-pdk",
 ]

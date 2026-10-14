@@ -70,6 +70,11 @@ jobs:
       - name: Build Extism guest
         run: cargo build -p tessivum-wasm-minimal --locked --release --target wasm32-unknown-unknown
 
+      - name: Verify real Rust guest ABI and security matrix
+        env:
+          TESSIVUM_WASM_GUEST: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/tessivum_wasm_minimal.wasm
+        run: cargo test -p tessivum-extism --test real_guest --locked -- --ignored --nocapture
+
       - name: Exercise Native, Extism, and Legacy runtimes
         env:
           TESSIVUM_WASM_GUEST: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/tessivum_wasm_minimal.wasm
