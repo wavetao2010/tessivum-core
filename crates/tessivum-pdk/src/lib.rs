@@ -128,7 +128,10 @@ where
             let request_id = request.request_id.clone();
             match handler(request) {
                 Ok(result) => Response::success(request_id, result),
-                Err(error) => Response::failure(request_id, error),
+                Err(mut error) => {
+                    error.phase = phase;
+                    Response::failure(request_id, error)
+                }
             }
         }
         Err(_) => Response::failure(

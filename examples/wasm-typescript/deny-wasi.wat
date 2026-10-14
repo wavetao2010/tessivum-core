@@ -1,0 +1,15 @@
+(module
+  ;; No WASI authority: every attempted syscall traps, including clocks and entropy.
+  (func (export "random_get") (param i32 i32) (result i32) unreachable)
+  (func (export "environ_get") (param i32 i32) (result i32) unreachable)
+  (func (export "environ_sizes_get") (param i32 i32) (result i32) unreachable)
+  (func (export "clock_time_get") (param i32 i64 i32) (result i32) unreachable)
+  (func (export "fd_close") (param i32) (result i32) unreachable)
+  (func (export "fd_fdstat_get") (param i32 i32) (result i32) unreachable)
+  (func (export "fd_prestat_get") (param i32 i32) (result i32) unreachable)
+  (func (export "fd_prestat_dir_name") (param i32 i32 i32) (result i32) unreachable)
+  (func (export "fd_read") (param i32 i32 i32 i32) (result i32) unreachable)
+  (func (export "fd_seek") (param i32 i64 i32 i32) (result i32) unreachable)
+  (func (export "fd_write") (param i32 i32 i32 i32) (result i32) unreachable)
+  (func (export "proc_exit") (param i32) unreachable)
+)

@@ -18,23 +18,78 @@ use tessivum_extism::{
     PluginManifest, ResourceLimits, WasmPackage, WasmPluginInstance, WasmPluginRuntime, WasmResult,
     ABI_VERSION,
 };
+#[derive(Clone, Copy)]
+enum GuestLanguage {
+    Rust,
+    TypeScript,
+}
+
+impl GuestLanguage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::TypeScript => "typescript",
+        }
+    }
+
+    fn manifest_id(self) -> &'static str {
+        match self {
+            Self::Rust => "real-rust-matrix",
+            Self::TypeScript => "real-typescript-matrix",
+        }
+    }
+
+    fn manifest_entry(self) -> &'static str {
+        match self {
+            Self::Rust => "tessivum_wasm_minimal.wasm",
+            Self::TypeScript => "tessivum_wasm_typescript.wasm",
+        }
+    }
+
+    fn package_specifier(self) -> &'static str {
+        match self {
+            Self::Rust => "real-rust",
+            Self::TypeScript => "real-typescript",
+        }
+    }
+}
+
+static GUEST_LANGUAGE: LazyLock<GuestLanguage> =
+    LazyLock::new(|| match std::env::var("TESSIVUM_GUEST_LANGUAGE") {
+        Ok(language) if language == "rust" => GuestLanguage::Rust,
+        Ok(language) if language == "typescript" => GuestLanguage::TypeScript,
+        Ok(language) => {
+            panic!("unsupported TESSIVUM_GUEST_LANGUAGE={language:?}; expected rust or typescript")
+        }
+        Err(std::env::VarError::NotPresent) => GuestLanguage::Rust,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("TESSIVUM_GUEST_LANGUAGE must be valid UTF-8 and either rust or typescript")
+        }
+    });
+
 static WASM: LazyLock<Vec<u8>> = LazyLock::new(|| {
     let path = guest_path();
     fs::read(&path).unwrap_or_else(|error| {
         panic!(
-            "cannot read compiled Rust guest at {}: {error}; set TESSIVUM_WASM_GUEST or build tessivum-wasm-minimal for wasm32-unknown-unknown",
+            "cannot read selected {} guest at {}: {error}; set TESSIVUM_WASM_GUEST to a compiled guest artifact",
+            GUEST_LANGUAGE.name(),
             path.display()
         )
     })
 });
 
 fn guest_path() -> PathBuf {
-    std::env::var_os("TESSIVUM_WASM_GUEST")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/wasm32-unknown-unknown/debug/tessivum_wasm_minimal.wasm")
-        })
+    let language = *GUEST_LANGUAGE;
+    if let Some(path) = std::env::var_os("TESSIVUM_WASM_GUEST") {
+        return PathBuf::from(path);
+    }
+    match language {
+        GuestLanguage::Rust => Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/wasm32-unknown-unknown/debug/tessivum_wasm_minimal.wasm"),
+        GuestLanguage::TypeScript => {
+            panic!("TESSIVUM_WASM_GUEST is required when TESSIVUM_GUEST_LANGUAGE=typescript")
+        }
+    }
 }
 
 fn wasm() -> Vec<u8> {
@@ -43,9 +98,9 @@ fn wasm() -> Vec<u8> {
 
 fn manifest() -> PluginManifest {
     PluginManifest {
-        id: "real-rust-matrix".into(),
+        id: GUEST_LANGUAGE.manifest_id().into(),
         version: "1.0.0".into(),
-        entry: "tessivum_wasm_minimal.wasm".into(),
+        entry: GUEST_LANGUAGE.manifest_entry().into(),
         abi: ABI_VERSION.into(),
         inject: Vec::new(),
         permissions: Capability::ALL.to_vec(),
@@ -55,7 +110,7 @@ fn manifest() -> PluginManifest {
 }
 
 fn package() -> WasmPackage {
-    WasmPackage::from_bytes(manifest(), wasm()).expect("compiled Rust guest satisfies the v1 ABI")
+    WasmPackage::from_bytes(manifest(), wasm()).expect("compiled guest satisfies the v1 ABI")
 }
 
 fn instance(
@@ -70,7 +125,7 @@ fn instance(
         limits,
         config,
     )
-    .expect("compiled Rust guest instantiates in the real Extism engine")
+    .expect("compiled guest instantiates in the real Extism engine")
 }
 
 #[derive(Default)]
@@ -95,7 +150,7 @@ impl HostState {
     }
 
     fn handle(&self, request: CapabilityRequest) -> WasmResult<Value> {
-        assert_eq!(request.plugin_id, "real-rust-matrix");
+        assert_eq!(request.plugin_id, GUEST_LANGUAGE.manifest_id());
         assert_ne!(request.instance_id, request.plugin_id);
         let mut effects = self.0.lock().expect("host effects are available");
         effects
@@ -192,7 +247,7 @@ fn registry(grant_all: bool) -> (Arc<CapabilityRegistry>, Arc<HostState>) {
 fn capability_call(instance: &WasmPluginInstance, capability: Capability) -> Value {
     instance
         .call(
-            json!({ "source": "real-rust-matrix" }),
+            json!({ "source": GUEST_LANGUAGE.manifest_id() }),
             json!({ "op": "capability", "capability": capability.as_str() }),
         )
         .expect("the guest reports host capability outcomes as a result")
@@ -205,7 +260,7 @@ fn assert_denied(result: &Value) {
 }
 
 #[test]
-#[ignore = "requires compiled Rust guest"]
+#[ignore = "requires a compiled WASM guest"]
 fn real_guest_rejects_invalid_manifest_and_requests() {
     let mut invalid = manifest();
     invalid.abi = "cordis.plugin/v2".into();
@@ -250,7 +305,7 @@ fn real_guest_rejects_invalid_manifest_and_requests() {
 }
 
 #[test]
-#[ignore = "requires compiled Rust guest"]
+#[ignore = "requires a compiled WASM guest"]
 fn real_guest_manifest_envelopes_five_exports_update_and_unload() {
     let bytes = wasm();
     for forbidden_import in [b"wasi_snapshot_preview1".as_slice(), b"wasi_unstable"] {
@@ -258,7 +313,7 @@ fn real_guest_manifest_envelopes_five_exports_update_and_unload() {
             !bytes
                 .windows(forbidden_import.len())
                 .any(|window| window == forbidden_import),
-            "minimal Rust guest must not depend on WASI"
+            "selected guest must not depend on WASI"
         );
     }
 
@@ -324,10 +379,46 @@ fn real_guest_manifest_envelopes_five_exports_update_and_unload() {
             "lifecycle:stop",
         ]
     );
+    drop(effects);
+
+    for phase in ["init", "call", "event", "update", "stop"] {
+        let (registry, state) = self::registry(phase != "init");
+        let guest = instance(
+            Arc::clone(&registry),
+            ResourceLimits::default(),
+            json!({ "matrix": true, "revision": 1 }),
+        );
+        if phase != "init" {
+            guest.init(Value::Null).unwrap();
+            registry.revoke(Capability::Log);
+        }
+        let error = match phase {
+            "init" => guest.init(Value::Null).unwrap_err(),
+            "call" => guest.call(Value::Null, Value::Null).unwrap_err(),
+            "event" => guest.event(Value::Null, Value::Null).unwrap_err(),
+            "update" => guest
+                .update(Value::Null, json!({ "matrix": true, "revision": 2 }))
+                .unwrap_err(),
+            "stop" => guest.stop().unwrap_err(),
+            _ => unreachable!(),
+        };
+        assert_eq!(error.code, "GUEST_REJECTED", "denied {phase}");
+        assert_eq!(error.phase, phase);
+        assert_eq!(guest.config(), json!({ "matrix": true, "revision": 1 }));
+        let effects = state.0.lock().unwrap();
+        assert_eq!(
+            effects.logs,
+            if phase == "init" {
+                vec![]
+            } else {
+                vec!["lifecycle:init"]
+            }
+        );
+    }
 }
 
 #[test]
-#[ignore = "requires compiled Rust guest"]
+#[ignore = "requires a compiled WASM guest"]
 fn real_guest_all_host_functions_grant_deny_revoke_and_mutate_state() {
     let (registry, state) = registry(false);
     let guest = instance(Arc::clone(&registry), ResourceLimits::default(), json!({}));
@@ -399,7 +490,7 @@ fn assert_fault(limits: ResourceLimits, payload: Value, code: &str) {
 }
 
 #[test]
-#[ignore = "requires compiled Rust guest"]
+#[ignore = "requires a compiled WASM guest"]
 fn real_guest_errors_malformed_trap_and_resource_limits_fail_closed() {
     assert_fault(
         ResourceLimits::default(),
@@ -418,6 +509,13 @@ fn real_guest_errors_malformed_trap_and_resource_limits_fail_closed() {
         json!({ "op": "trap" }),
         "GUEST_TRAP",
     );
+    if matches!(*GUEST_LANGUAGE, GuestLanguage::TypeScript) {
+        assert_fault(
+            ResourceLimits::default(),
+            json!({ "op": "wasi-clock" }),
+            "GUEST_TRAP",
+        );
+    }
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback probe binds");
     listener
         .set_nonblocking(true)
@@ -519,7 +617,7 @@ fn real_guest_errors_malformed_trap_and_resource_limits_fail_closed() {
 }
 
 #[test]
-#[ignore = "requires compiled Rust guest"]
+#[ignore = "requires a compiled WASM guest"]
 fn real_guest_cancellation_interrupts_running_wasm() {
     let limits = ResourceLimits {
         fuel: 10_000_000_000,
@@ -569,23 +667,23 @@ fn block_on<F: Future>(future: F) -> F::Output {
 }
 
 #[test]
-#[ignore = "requires compiled Rust guest"]
+#[ignore = "requires a compiled WASM guest"]
 fn real_runtime_dispose_invokes_stop_and_invalidates_old_handle() {
     let (registry, state) = registry(true);
     let runtime = WasmPluginRuntime::new(registry, ResourceLimits::default());
     runtime
-        .register("real-rust", package())
-        .expect("real Rust package registers");
+        .register(GUEST_LANGUAGE.package_specifier(), package())
+        .expect("real guest package registers");
     let entry: Entry = serde_json::from_value(json!({
-        "package": "real-rust",
-        "id": "real-rust-entry",
+        "package": GUEST_LANGUAGE.package_specifier(),
+        "id": format!("{}-entry", GUEST_LANGUAGE.package_specifier()),
         "runtime": "wasm",
         "config": { "matrix": true }
     }))
     .expect("runtime entry parses");
     let mut handle: Box<dyn RuntimeHandle> = block_on(runtime.instantiate(
         ResolvedPackage {
-            specifier: "real-rust".into(),
+            specifier: GUEST_LANGUAGE.package_specifier().into(),
             location: String::new(),
         },
         entry,

@@ -1,4 +1,4 @@
-name: Windows CI
+name: Core CI
 
 on:
   push:
@@ -79,3 +79,38 @@ jobs:
         env:
           TESSIVUM_WASM_GUEST: ${{ github.workspace }}/target/wasm32-unknown-unknown/release/tessivum_wasm_minimal.wasm
         run: cargo run -p tessivum-runtime-smoke --locked
+
+  typescript-wasm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: dtolnay/rust-toolchain@032958afbdc797a9164d3bc0b56325c1308924a5 # 1.97.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Install checksum-pinned guest compiler
+        run: |
+          mkdir -p "$RUNNER_TEMP/w2-tools"
+          cd "$RUNNER_TEMP/w2-tools"
+          curl -fL --retry 3 https://github.com/extism/js-pdk/releases/download/v1.7.0/extism-js-x86_64-linux-v1.7.0.gz -o extism-js.gz
+          echo '63b72da2f5e88655522dc21477de549f238a2f40546a69ce4e0fce7e78654035  extism-js.gz' | sha256sum --check -
+          gzip -d extism-js.gz
+          chmod +x extism-js
+          curl -fL --retry 3 https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz -o binaryen.tar.gz
+          echo '2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  binaryen.tar.gz' | sha256sum --check -
+          tar -xzf binaryen.tar.gz
+          echo "$RUNNER_TEMP/w2-tools" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP/w2-tools/binaryen-version_133/bin" >> "$GITHUB_PATH"
+      - name: Compile actual TypeScript guest
+        working-directory: examples/wasm-typescript
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          cat dist/plugin.wasm.sha256
+      - name: Verify same ABI and security matrix
+        env:
+          TESSIVUM_GUEST_LANGUAGE: typescript
+          TESSIVUM_WASM_GUEST: ${{ github.workspace }}/examples/wasm-typescript/dist/plugin.wasm
+        run: cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture

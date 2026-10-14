@@ -106,7 +106,52 @@ Consumers must branch on host error `code` and `phase`, not `message` or
 invalid envelopes fail with a structured `PluginError`.
 
 `tessivum-pdk::export_guest!` implements the two documented forms for Rust
-guests. It does not emit an `ok` discriminator.
+guests. It does not emit an `ok` discriminator. Its shared `dispatch` boundary
+normalizes handler errors (including propagated Host capability failures) to
+the invoked export phase, matching the TypeScript lifecycle helper.
+
+### Building the TypeScript/JavaScript guest
+
+`examples/wasm-typescript` is a real ES2020 CommonJS → QuickJS/WASM build,
+not Node.js compatibility. Install [extism-js release v1.7.0](https://github.com/extism/js-pdk/releases/tag/v1.7.0)
+and [Binaryen 133](https://github.com/WebAssembly/binaryen/releases/tag/version_133),
+put `extism-js`, `wasm-merge`, and `wasm-opt` on `PATH`, then run from Core root:
+
+```sh
+(cd examples/wasm-typescript && bun install --frozen-lockfile && bun run build)
+TESSIVUM_GUEST_LANGUAGE=typescript \
+TESSIVUM_WASM_GUEST="$PWD/examples/wasm-typescript/dist/plugin.wasm" \
+  cargo test --locked -p tessivum-extism --test real_guest -- --ignored --nocapture
+TESSIVUM_WASM_GUEST="$PWD/examples/wasm-typescript/dist/plugin.wasm" \
+  cargo run --locked -p tessivum-runtime-smoke
+```
+
+The lockfile pins `@extism/js-pdk` 1.1.1, TypeScript 5.9.3 and esbuild 0.28.2.
+CI pins Linux compiler archives by SHA-256. The accepted macOS ARM64 archives are
+`extism-js-aarch64-macos-v1.7.0.gz` (`12c01c2bb2240a6a05a4f8babe680c793c397d84e6a1497a7ca1312e78a475c3`)
+and `binaryen-version_133-arm64-macos.tar.gz` (`ad66da82ac13f163e424b1643f16c6dfcccc98b5966296b43e52d3cab04f84a8`).
+The v1.7.0 compiler binary reports `extism-js 1.6.1`; use the release asset and
+checksum, not that version string alone, as its identity.
+
+The compiler only accepts identifier Host method names. Build-time WASM linking
+maps private underscore bindings to the eight exact dotted ABI imports; it adds
+no Host aliases. The upstream engine also imports WASI. `deny-wasi.wat` links
+every such syscall to an unconditional trap, and the build rejects remaining
+WASI or unexpected import namespaces. The Host stays `with_wasi(false)` with
+network denied. Runtime clock access (`Date.now()`), entropy syscalls and file
+operations are unavailable; this is not a general Node/npm execution environment.
+
+The compiler snapshots an initialized QuickJS engine using Wizer. Repeated
+builds on the same toolchain produced different bytes; the build procedure and
+behavior are repeatable, **byte-identical reproducibility is not claimed**.
+Record and retain each accepted `dist/plugin.wasm` with its generated SHA-256.
+Run the matrix on that exact artifact; type-checking or a prior artifact hash
+does not certify a rebuilt guest.
+
+Select `TESSIVUM_GUEST_LANGUAGE=rust` (the default) for the existing Rust artifact.
+TypeScript requires an explicit artifact path; missing artifacts and invalid
+language names fail rather than silently skipping the ignored matrix.
+
 
 ### Capability functions
 

@@ -170,3 +170,51 @@ host capability handlers need their own deadlines/quotas. This does not certify
 TS/JS, Go, Python, other platforms, product profiles or release archives. Full
 local command output, including the initial failing regression and corrected
 test/lint failures, is retained in product `test-artifacts/c2-complete/`.
+
+## W2 TypeScript/JavaScript WASM — 2026-10-14
+
+Validated on macOS ARM64 against the C2 source baseline
+`38032f769a8a558d2fb18b9cc171ced18bd1c342`, using extism-js release v1.7.0,
+Binaryen 133 and the locked TypeScript example dependencies. Reproduction and
+compiler archive checksums are in [PROTOCOLS.md](PROTOCOLS.md#building-the-typescriptjavascript-guest).
+
+- The original compiled example loaded under the unchanged no-WASI Host but
+  failed init with `PROTOCOL_INVALID` because of its top-level `ok` field.
+  The corrected guest uses exact request/response envelopes and arbitrary JSON
+  context; invalid requests produce structured guest errors.
+- Review exposed a shared error-phase defect: lifecycle Host denials were
+  forwarded with phase `call`, producing `PROTOCOL_INVALID` in both real TS
+  and Rust guests. The TS lifecycle helper and Rust PDK dispatch boundary now
+  assign the invoked export phase. The shared matrix reproduces the original
+  failure and verifies denied init plus revoked call/event/update/stop produce
+  `GUEST_REJECTED`, without Host mutations or committing rejected config.
+- All six shared real-guest matrix tests passed with
+  `TESSIVUM_GUEST_LANGUAGE=typescript`, including all eight memory-based Host
+  Functions, state mutations, permission denial/revocation, five exports,
+  strict envelopes, traps, limits, cancellation, update and stale-handle teardown.
+  The TypeScript-only `Date.now()` probe traps; the live loopback network probe
+  receives no connection. Production Host limits and WASI/network policy did not change.
+- The actual `runtime-smoke` program loaded and disposed Native, compiled TS
+  Extism WASM and Legacy Node runtimes. The Rust artifact passed the same six
+  checks again; Core workspace/all-targets passed 132 tests and strict Clippy.
+- The full suite exposed an existing startup-log fixture race: its peer closed
+  immediately after Ready, allowing EOF before handshake observation. The test
+  now retains the peer until the client observations finish, matching the adjacent
+  response test. No bridge implementation or assertion was weakened.
+
+Accepted TS artifact SHA-256:
+`2304cedcd85c87aae2ba12456bdfda8422c042e2d9c8136efa7c2270aa0a1f39`
+(2,494,018 bytes); rebuilt Rust artifact:
+`82f5012ad10c7627c448d6b65fad48aee915602f91ccb50d112e52e0b8e65ca0`.
+Before the phase correction, two identical-source TS builds produced different
+hashes (`ae3fea79…` and `9f52226c…`) despite passing the then-existing checks.
+The upstream Wizer snapshot is not byte-deterministic. The full build hashes
+and failure logs remain in the evidence; only the final artifacts above passed
+the expanded lifecycle-denial matrix.
+
+CI now separately compiles TS with checksum-pinned Linux tools and explicitly
+runs the matrix. That configuration is not a claim of an observed remote CI run.
+Local full logs and the accepted artifact are retained in product
+`test-artifacts/w2-complete/`. Product same-candidate consumption is recorded in
+its scope checklist. Go/Python, product profiles and release-platform archives
+remain outside W2 acceptance.

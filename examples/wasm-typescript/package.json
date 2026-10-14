@@ -4,10 +4,12 @@
   "private": true,
   "description": "Cordis plugin ABI v1 guest written for the Extism JavaScript PDK",
   "scripts": {
-    "typecheck": "tsc --noEmit --lib es2020 --types @extism/js-pdk src/index.ts"
+    "typecheck": "tsc --noEmit --strict --lib es2020 --types @extism/js-pdk src/index.ts plugin.d.ts",
+    "build": "node build.mjs"
   },
   "devDependencies": {
-    "@extism/js-pdk": "^1.1.1",
-    "typescript": "^5.0.0"
+    "@extism/js-pdk": "1.1.1",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
   }
 }

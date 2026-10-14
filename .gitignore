@@ -1,3 +1,5 @@
 /target/
 /oracle/node_modules/
 /node/compat-host/node_modules/
+/examples/wasm-typescript/node_modules/
+/examples/wasm-typescript/dist/

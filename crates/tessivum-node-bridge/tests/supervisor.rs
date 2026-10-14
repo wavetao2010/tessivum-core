@@ -149,6 +149,7 @@ fn client_accepts_a_log_before_ready() {
     client.set_log_handler(move |payload| {
         logged.send(payload).expect("startup log is observed");
     });
+    let (release_host, hold_host) = mpsc::channel();
     let host = thread::spawn(move || {
         let codec = FrameCodec::default();
         assert_eq!(
@@ -174,6 +175,9 @@ fn client_accepts_a_log_before_ready() {
                 ),
             )
             .expect("test host sends ready capability");
+        hold_host
+            .recv()
+            .expect("client releases host after observing readiness");
     });
 
     client
@@ -187,6 +191,9 @@ fn client_accepts_a_log_before_ready() {
         json!({ "message": "starting" })
     );
     client.close();
+    release_host
+        .send(())
+        .expect("test host release is delivered");
     host.join().expect("test host thread settles");
 }
 
